@@ -1,4 +1,4 @@
-# Use the official micromamba image
+# Use the official micromamba image [cite: 2]
 FROM mambaorg/micromamba:1.5-jammy
 
 # Switch to root to install git
@@ -20,18 +20,20 @@ ARG CACHEBUST=1
 RUN git clone https://github.com/RedPenguin100/TAUSO.git .
 
 # ==========================================
-# HEAVY DEPENDENCIES COMMENTED OUT FOR UI DEV
+# DEPENDENCIES RE-ENABLED FOR TAUSO CLI
 # ==========================================
-# RUN micromamba install -y -n base -f environment.yml && \
-#     micromamba clean --all --yes
+# Restore the actual environment so `tauso setup-genome` works [cite: 3]
+RUN micromamba install -y -n base -f environment.yml && \
+    micromamba clean --all --yes
 
-# RUN micromamba run -n base pip install -e . \
-#     streamlit watchdog && \
-#     micromamba run -n base tauso install-raccess
+RUN micromamba run -n base pip install -e .
 
-# --- LIGHTWEIGHT REPLACEMENT JUST FOR UI ---
-RUN micromamba install -y -n base -c conda-forge python=3.11 pip streamlit watchdog pandas
-# ==========================================
+# Install the UI dependencies on top of the base environment [cite: 4]
+# We use pip here to avoid conda-forge C++ library conflicts with pyarrow
+RUN micromamba run -n base pip install streamlit watchdog
+
+# Add the protobuf fallback environment variable just to be absolutely safe
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # Expose the default Streamlit port
 EXPOSE 8501
@@ -41,8 +43,9 @@ EXPOSE 8501
 # ==========================================
 USER root
 
-# Copy your local UI script into the container
+# Copy your local UI scripts into the container
 COPY app.py /app/app.py
+COPY cache_genes.py /app/cache_genes.py
 
 # Copy and set permissions for the entrypoint
 COPY entrypoint.sh /app/entrypoint.sh

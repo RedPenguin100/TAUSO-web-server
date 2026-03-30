@@ -1,5 +1,8 @@
 import streamlit as st
 import io
+import sqlite3
+import os
+from tauso.genome.read_human_genome import get_locus_to_data_dict
 
 # Configure the page layout and title
 st.set_page_config(
@@ -8,8 +11,15 @@ st.set_page_config(
     layout="centered"
 )
 
-# Mock list of target genes (this would eventually be pulled from your DB)
-MOCK_GENES = ["EGFR", "KRAS", "TP53", "BRCA1", "SMN1", "HTT"]
+@st.cache_data(ttl=3600)
+def fetch_genes():
+    db_path = os.path.join(os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "available_genes.json")
+    if not os.path.exists(db_path):
+        return ["-- Database not initialized --"]
+
+    with open(db_path, "r") as f:
+        return json.load(f)
+
 
 def main():
     # Header Section
@@ -19,6 +29,9 @@ def main():
 
     st.write("Please select a target gene from the database OR upload a custom FASTA file to begin the analysis pipeline.")
 
+    # Fetch the genes on load
+    gene_list = fetch_genes()
+
     # Input Section using Streamlit columns for layout
     col1, col2 = st.columns(2)
 
@@ -26,7 +39,7 @@ def main():
         st.subheader("Database Selection")
         selected_gene = st.selectbox(
             "Select a Target Gene:",
-            options=["-- Choose a gene --"] + MOCK_GENES
+            options=["-- Choose a gene --"] + gene_list
         )
 
     with col2:
@@ -42,17 +55,16 @@ def main():
 
         # Determine which input method the user utilized
         if uploaded_file is not None:
-            # Read the uploaded file as a string
             stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
             target_data = stringio.read()
             source_info = f"Uploaded File: {uploaded_file.name}"
 
-        elif selected_gene != "-- Choose a gene --":
+        elif selected_gene != "-- Choose a gene --" and not selected_gene.startswith("--"):
             target_data = f"Simulating database fetch for sequence: {selected_gene}..."
             source_info = f"Selected Gene: {selected_gene}"
 
         else:
-            st.error("Please select a gene or upload a FASTA file before proceeding.")
+            st.error("Please select a valid gene or upload a FASTA file before proceeding.")
             return
 
         # --- Processing UI ---
