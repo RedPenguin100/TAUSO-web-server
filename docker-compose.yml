@@ -1,13 +1,16 @@
-version: '3.8'
-
 services:
   tauso-web:
     build: .
     ports:
       - "8501:8501"
     volumes:
-      # Maps a local folder named .tauso_data directly into the container
       - ./.tauso_data:/home/mambauser/.tauso_data
+
+    # 1. Load the external file
+    env_file:
+      - .env.local
+
+    # 2. Hardcoded or override variables
     environment:
       - PORT=8501
       - TAUSO_DATA_DIR=/home/mambauser/.tauso_data
