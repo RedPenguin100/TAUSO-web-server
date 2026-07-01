@@ -23,9 +23,14 @@ ENV TAUSO_DATA_DIR=$TAUSO_WORKSPACE/data
 # Set working directory strictly for the TAUSO source code
 WORKDIR $TAUSO_WORKSPACE/code
 
-ARG CACHEBUST=7
-RUN git clone --depth 1 -b mk/model_execution2 --sparse https://github.com/RedPenguin100/TAUSO.git . && \
-    git sparse-checkout set --no-cone '/*' '!/notebooks/' && \
+# Pin the TAUSO source to a specific main commit for reproducible builds.
+ARG TAUSO_COMMIT=a5ae6cfd4df90bfc88c8b8d2afda70b163c989d3
+RUN git init -q . && \
+    git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
+    git config core.sparseCheckout true && \
+    printf '/*\n!/notebooks/\n!/tests/\n' > .git/info/sparse-checkout && \
+    git fetch --depth 1 origin ${TAUSO_COMMIT} && \
+    git checkout -q FETCH_HEAD && \
     git submodule update --init --recursive
 
 # Install dependencies and the TAUSO package natively
