@@ -1,0 +1,5 @@
+.tauso_data
+.git
+.idea
+__pycache__
+*.pyc
