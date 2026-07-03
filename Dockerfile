@@ -24,7 +24,7 @@ ENV TAUSO_DATA_DIR=$TAUSO_WORKSPACE/data
 WORKDIR $TAUSO_WORKSPACE/code
 
 # Pin the TAUSO source to a specific main commit for reproducible builds.
-ARG TAUSO_COMMIT=a5ae6cfd4df90bfc88c8b8d2afda70b163c989d3
+ARG TAUSO_COMMIT=b2b68b3a74ad661c189dde37278d95f0f2a7c1ea
 RUN git init -q . && \
     git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
     git config core.sparseCheckout true && \
