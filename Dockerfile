@@ -37,7 +37,8 @@ RUN git init -q . && \
 RUN micromamba install -y -n base -f environment.yml && \
     micromamba clean --all --yes
 
-RUN micromamba run -n base uv pip install --system . streamlit watchdog python-dotenv "brevo-python<4.0.0" biopython
+COPY requirements.txt ./
+RUN micromamba run -n base uv pip install --system . -r requirements.txt
 
 # Add the protobuf fallback environment variable
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
