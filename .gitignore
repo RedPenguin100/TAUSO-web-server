@@ -1,3 +1,4 @@
 *.idea
 .tauso_data
 *.env.local
+.venv

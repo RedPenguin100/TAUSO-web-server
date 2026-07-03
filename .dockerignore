@@ -1,5 +1,6 @@
 .tauso_data
 .git
 .idea
+.venv
 __pycache__
 *.pyc
