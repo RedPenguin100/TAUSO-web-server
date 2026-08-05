@@ -23,16 +23,22 @@ ENV TAUSO_DATA_DIR=$TAUSO_WORKSPACE/data
 # Set working directory strictly for the TAUSO source code
 WORKDIR $TAUSO_WORKSPACE/code
 
-ARG CACHEBUST=7
-RUN git clone --depth 1 -b mk/model_execution2 --sparse https://github.com/RedPenguin100/TAUSO.git . && \
-    git sparse-checkout set --no-cone '/*' '!/notebooks/' && \
+# Pin the TAUSO source to a specific main commit for reproducible builds.
+ARG TAUSO_COMMIT=b2b68b3a74ad661c189dde37278d95f0f2a7c1ea
+RUN git init -q . && \
+    git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
+    git config core.sparseCheckout true && \
+    printf '/*\n!/notebooks/\n!/tests/\n' > .git/info/sparse-checkout && \
+    git fetch --depth 1 origin ${TAUSO_COMMIT} && \
+    git checkout -q FETCH_HEAD && \
     git submodule update --init --recursive
 
 # Install dependencies and the TAUSO package natively
 RUN micromamba install -y -n base -f environment.yml && \
     micromamba clean --all --yes
 
-RUN micromamba run -n base uv pip install --system . streamlit watchdog python-dotenv "brevo-python<4.0.0" biopython
+COPY requirements.txt ./
+RUN micromamba run -n base uv pip install --system . -r requirements.txt
 
 # Add the protobuf fallback environment variable
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
