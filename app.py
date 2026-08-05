@@ -90,7 +90,15 @@ def main():
     st.divider()
 
     selected_cell_line = st.selectbox("Cell Line (Optional)", ["None", "HEK293", "HeLa"])
-    user_cell_line = None if selected_cell_line == "None" else selected_cell_line
+    if selected_cell_line == "None":
+        st.caption(
+            "No cell-line conditioning: cell-specific off-target scores are left missing, codon usage "
+            "falls back to the cross-cell-line consensus, and half-life to the gene-level average."
+        )
+    # The selection is passed through as a string. "None" is TAUSO's no-cell-line sentinel, which the
+    # half-life, codon-usage and off-target features each handle explicitly. A Python None would instead
+    # leave design_asos on its default cell line, T24.
+    user_cell_line = selected_cell_line
 
 
     # <-- 2. NEW EMAIL INPUT
