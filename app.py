@@ -1,19 +1,25 @@
-import streamlit as st
-import io
-import os
-import json
-from pipeline_runner import CHEMISTRIES, trigger_background_job, JobConfig
-
 import hashlib
+import io
+import json
+import os
+
+import streamlit as st
 from Bio import SeqIO
 
-
-# Configure the page layout and title
-st.set_page_config(
-    page_title="TAUSO | ASO Efficacy Predictor",
-    page_icon="🧬",
-    layout="centered"
+from pipeline_runner import (
+    CELL_DENSITY_RANGE,
+    CHEMISTRIES,
+    DEFAULT_CELL_DENSITY,
+    DEFAULT_CHEMISTRY,
+    DEFAULT_DOSAGE_NM,
+    DOSAGE_RANGE_NM,
+    TRANSFECTION_METHODS,
+    JobConfig,
+    describe_pattern_problem,
+    trigger_background_job,
 )
+
+st.set_page_config(page_title="TAUSO | ASO design", layout="centered")
 
 # TAUSO also has a mouse genome, but every cell line with expression data here is human.
 ORGANISM = "human"
@@ -21,12 +27,14 @@ ORGANISM = "human"
 # Label for the no-cell-line option, set apart from the real cell lines around it.
 NO_CELL_LINE = "— None (no cell metadata) —"
 
+GENE_PLACEHOLDER = "Search a gene…"
+
 
 @st.cache_data(ttl=3600)
 def fetch_genes():
     db_path = os.path.join(os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "available_genes.json")
     if not os.path.exists(db_path):
-        return ["-- Database not initialized --"]
+        return []
 
     with open(db_path, "r") as f:
         return json.load(f)
@@ -68,10 +76,10 @@ def fetch_cell_lines(organism: str):
 
 
 def parse_fasta_input(raw_text: str):
-    """Robust FASTA parsing using Biopython's SeqIO with sequence hashing."""
+    """Parse pasted or uploaded FASTA into (name, sequence). The name carries a hash of the
+    sequence so two different sequences under one header stay distinguishable downstream."""
     raw_text = raw_text.strip()
 
-    # Extract the name and sequence safely
     if not raw_text.startswith(">"):
         cleaned_seq = "".join(raw_text.split())
         base_name = "Custom_Sequence"
@@ -84,155 +92,137 @@ def parse_fasta_input(raw_text: str):
             except StopIteration:
                 raise ValueError("The provided FASTA format is invalid or empty.")
 
-    # ---> ADD THIS EXACT LINE HERE <---
-    cleaned_seq = cleaned_seq.upper().replace('T', 'U')
+    cleaned_seq = cleaned_seq.upper().replace("T", "U")
+    seq_hash = hashlib.md5(cleaned_seq.encode("utf-8")).hexdigest()[:8]
+    return f"{base_name}_{seq_hash}", cleaned_seq
 
-    # --- NEW: Hashing Logic ---
-    # Create a deterministic MD5 hash of the actual sequence text
-    seq_hash = hashlib.md5(cleaned_seq.encode('utf-8')).hexdigest()[:8]
 
-    # Combine the user's name with the unique hash
-    unique_name = f"{base_name}_{seq_hash}"
+def target_section():
+    """The target to design against: a gene from the reference, or a sequence the user supplies.
+    Returns (name, sequence, description); sequence is empty for a gene, which the worker looks up."""
+    source = st.radio(
+        "Target", ["Gene", "FASTA"], horizontal=True, label_visibility="collapsed"
+    )
 
-    return unique_name, cleaned_seq
+    if source == "Gene":
+        genes = fetch_genes()
+        if not genes:
+            st.error("The gene database is not initialised yet.")
+            return None, None, None
+        gene = st.selectbox(
+            "Gene", [GENE_PLACEHOLDER] + genes, label_visibility="collapsed"
+        )
+        if gene == GENE_PLACEHOLDER:
+            return None, None, None
+        return gene, "", f"Selected Gene: {gene}"
+
+    pasted = st.text_area(
+        "Paste FASTA or a raw sequence",
+        height=140,
+        placeholder=">MyTranscript\nAUGCGUACGUUAG…",
+    )
+    uploaded = st.file_uploader("…or upload a file", type=["fasta", "fa", "txt"])
+
+    # A file is the more deliberate action of the two, so it wins if both are present.
+    if uploaded is not None:
+        name, sequence = parse_fasta_input(uploaded.getvalue().decode("utf-8"))
+        return name, sequence, f"Uploaded File: {uploaded.name}"
+    if pasted.strip():
+        name, sequence = parse_fasta_input(pasted.strip())
+        return name, sequence, "Pasted Sequence"
+    return None, None, None
+
+
+def conditions_section():
+    """Chemistry and assay conditions. Every one of these is a model input, so the defaults are
+    stated rather than hidden: the sugar/backbone pair defines the oligo, and transfection, dosage
+    and cell density describe the experiment the prediction is conditioned on."""
+    preset_column, transfection_column = st.columns([2, 2])
+    with preset_column:
+        preset_name = st.selectbox("Chemistry", list(CHEMISTRIES), index=list(CHEMISTRIES).index(DEFAULT_CHEMISTRY))
+    with transfection_column:
+        transfection = st.selectbox("Transfection", TRANSFECTION_METHODS)
+
+    preset = CHEMISTRIES[preset_name]
+    sugar_column, backbone_column = st.columns([2, 2])
+    with sugar_column:
+        sugar = st.text_input("Sugar", value=preset["pattern"], key=f"sugar_{preset_name}")
+    with backbone_column:
+        backbone = st.text_input("Backbone", value=preset["ps_pattern"], key=f"backbone_{preset_name}")
+
+    dosage_column, density_column = st.columns([2, 2])
+    with dosage_column:
+        dosage = st.number_input(
+            "Dosage (nM)", min_value=DOSAGE_RANGE_NM[0], max_value=DOSAGE_RANGE_NM[1],
+            value=DEFAULT_DOSAGE_NM, step=100,
+        )
+    with density_column:
+        density = st.number_input(
+            "Cells per well", min_value=CELL_DENSITY_RANGE[0], max_value=CELL_DENSITY_RANGE[1],
+            value=DEFAULT_CELL_DENSITY, step=1000,
+        )
+
+    st.caption(
+        f"{len(sugar)}-mer · M 2'-MOE · C cEt · L LNA · d DNA · ∗ phosphorothioate. "
+        "Defaults are the median of the training experiments."
+    )
+    return sugar, backbone, transfection, int(dosage), int(density)
+
 
 def main():
-    # Header Section
-    st.title("🧬 TAUSO")
-    st.markdown("**Predictive modeling for Antisense Oligonucleotide (ASO) efficacy.**")
-    st.divider()
+    st.title("TAUSO")
+    st.caption("Design antisense oligonucleotides against a human transcript.")
 
-    # Organism is the first choice: it decides which genome the target is read from and which cell
-    # lines exist. Only human is supported, so it is shown rather than offered.
-    st.markdown(f"**Organism:** {ORGANISM}")
-    st.caption("Only human is supported at the moment.")
+    target_name, target_sequence, source_info = target_section()
 
-    st.write("Please choose your input method below to begin the analysis pipeline.")
+    with st.container(border=True):
+        sugar, backbone, transfection, dosage, density = conditions_section()
 
-    # Fetch the genes on load
-    gene_list = fetch_genes()
-
-    # Using tabs to cleanly separate the three input methods
-    tab1, tab2, tab3 = st.tabs(["🗄️ Database Selection", "📝 Paste Sequence", "📁 Upload FASTA"])
-
-    with tab1:
-        selected_gene = st.selectbox(
-            "Select a Target Gene:",
-            options=["-- Choose a gene --"] + gene_list
+        cell_line = st.selectbox(
+            "Cell line (optional)", [NO_CELL_LINE] + fetch_cell_lines(ORGANISM)
         )
+        if cell_line == NO_CELL_LINE:
+            st.markdown(
+                ":orange[**No cell metadata:** some features revert to NaN or to a default. "
+                "For detail, see TAUSO Supplementary Material S1.]"
+            )
 
-    with tab2:
-        pasted_sequence = st.text_area(
-            "Paste sequence or FASTA text:",
-            height=150,
-            placeholder=">Sequence_Name\nATGCGTACGTTAG..."
-        )
+    email = st.text_input("Email for results", placeholder="you@lab.org")
 
-    with tab3:
-        uploaded_file = st.file_uploader("Upload FASTA File:", type=['fasta', 'fa', 'txt'])
+    if not st.button("Design ASOs", type="primary", use_container_width=True):
+        return
 
-    st.divider()
-
-    cell_line_column, chemistry_column = st.columns(2)
-    with cell_line_column:
-        # Streamlit cannot style one option of a selectbox, so "None" is set apart by its label.
-        selected_cell_line = st.selectbox(
-            "Supported Cell Line (Optional)",
-            [NO_CELL_LINE] + fetch_cell_lines(ORGANISM),
-        )
-    with chemistry_column:
-        selected_chemistry = st.selectbox("Chemistry", list(CHEMISTRIES))
-    if selected_cell_line == NO_CELL_LINE:
-        st.markdown(
-            ":orange[**No cell metadata:** some features revert to NaN or to a default. "
-            "For detail, see TAUSO Supplementary Material S1.]"
-        )
-
-    chemistry = CHEMISTRIES[selected_chemistry]
-    st.caption(
-        f"{len(chemistry['pattern'])}-mer · sugars `{chemistry['pattern']}` · "
-        f"backbone `{chemistry['ps_pattern']}` (full phosphorothioate)"
-    )
+    if target_name is None:
+        st.error("Choose a gene, or paste or upload a sequence.")
+        return
+    if not email or "@" not in email:
+        st.error("Enter an email address — results are delivered by email.")
+        return
+    problem = describe_pattern_problem(sugar, backbone)
+    if problem:
+        st.error(problem)
+        return
 
     # "None" is TAUSO's no-cell-line sentinel and is passed through as that string: the half-life,
     # codon-usage and off-target features each handle it explicitly, while a Python None would leave
-    # design_asos on its own default cell line, T24.
-    user_cell_line = "None" if selected_cell_line == NO_CELL_LINE else selected_cell_line
-
-
-    # <-- 2. NEW EMAIL INPUT
-    user_email = st.text_input("📧 Notification Email:", placeholder="Enter your email to receive results...")
-
-    # Form submission logic
-    if st.button("Initialize Pipeline", type="primary", use_container_width=True):
-
-        # <-- 3. NEW EMAIL VALIDATION
-        if not user_email or "@" not in user_email:
-            st.error("Please provide a valid email address before proceeding.")
-            return
-
-        target_data = None
-        target_mrna_name = None
-        source_info = None
-
-        try:
-            # Logic hierarchy to determine which input to use if they clicked around
-            if uploaded_file is not None:
-                raw_text = uploaded_file.getvalue().decode("utf-8")
-                target_mrna_name, target_data = parse_fasta_input(raw_text)
-                source_info = f"Uploaded File: {uploaded_file.name}"
-
-            elif pasted_sequence.strip():
-                target_mrna_name, target_data = parse_fasta_input(pasted_sequence.strip())
-                source_info = "Pasted Sequence"
-
-            elif selected_gene != "-- Choose a gene --" and not selected_gene.startswith("--"):
-                # Defer the fetch to the worker: set the name, but leave the data empty
-                target_mrna_name = selected_gene
-                target_data = ""
-                source_info = f"Selected Gene: {selected_gene}"
-
-            else:
-                st.error("Please select a valid gene, paste a sequence, or upload a FASTA file before proceeding.")
-                return
-
-        except ValueError as e:
-            # Catches the formatting errors from parse_fasta_input and displays them safely
-            st.error(f"Input Error: {str(e)}")
-            return
-
-        # Initialize the config with the parsed info
-        config = JobConfig(
-            target_mrna_name=target_mrna_name,
-            target_data=target_data,
+    # design_asos on its own default cell line.
+    trigger_background_job(
+        JobConfig(
+            target_mrna_name=target_name,
+            target_data=target_sequence,
             source_info=source_info,
-            user_email=user_email,
-            cell_line=user_cell_line,
-            chemistry=selected_chemistry,
+            user_email=email,
+            cell_line="None" if cell_line == NO_CELL_LINE else cell_line,
+            chemical_pattern=sugar,
+            ps_pattern=backbone,
+            transfection=transfection,
+            dosage_nm=dosage,
+            cell_density=density,
         )
+    )
+    st.success(f"Queued. Results for {source_info} will be emailed to {email}.")
+    st.caption("A run takes a few minutes. You will get an email either way, including if it fails.")
 
-        # --- Processing UI ---
-        st.success("Input accepted! Starting analysis...")
-
-        with st.status("Submitting job to TAUSO Pipeline...", expanded=True) as status:
-            st.write(f"**Source:** {source_info}")
-            st.write(f"**Email:** {user_email}")
-            st.write("Initializing target sequence parameters...")
-
-            # <-- 4. NEW BACKGROUND TRIGGER
-            # This replaces the blocking tauso logic that was here before
-            trigger_background_job(config)
-
-
-            st.write("Extracting context and queuing job...")
-            st.write("Job handed off to background processor.")
-
-            status.update(label="Job successfully queued! Check your email.", state="complete", expanded=False)
-
-        # Show a preview of the data/results
-        st.subheader("Sequence Preview")
-        preview_text = target_data[:200] + "..." if len(target_data) > 200 else target_data
-        st.code(preview_text, language="text")
 
 if __name__ == "__main__":
     main()

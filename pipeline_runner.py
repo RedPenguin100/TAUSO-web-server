@@ -48,6 +48,48 @@ for _spec in CHEMISTRIES.values():
 
 DEFAULT_CHEMISTRY = "2'-MOE"
 
+# Sugar codes TAUSO understands, and the two linkage codes: '*' phosphorothioate, 'o' phosphodiester.
+SUGAR_CODES = "MCLd"
+LINKAGE_CODES = "*o"
+# The model is not calibrated outside the ASO lengths seen in training.
+ASO_LENGTH_RANGE = (12, 28)
+
+# Delivery methods offered. TAUSO also accepts "Other", which is the catch-all the training data
+# uses for cohorts whose method was never recorded -- not something a user can meaningfully pick.
+TRANSFECTION_METHODS = ["Gymnosis", "Electroporation", "Lipofection"]
+
+# Assay conditions are model inputs, so they are bounded by what the training experiments covered
+# and default to the median of that distribution rather than to the low edge.
+DOSAGE_RANGE_NM = (2, 20000)
+DEFAULT_DOSAGE_NM = 4000
+CELL_DENSITY_RANGE = (85, 300000)
+DEFAULT_CELL_DENSITY = 20000
+
+
+def describe_pattern_problem(chemical_pattern: str, ps_pattern: str) -> Optional[str]:
+    """Explain why this sugar/backbone pair cannot be designed, or None if it can. Several features
+    return NaN rather than failing when the pattern does not line up with the oligo, so the pair is
+    checked here instead of being discovered as a blank column in the results."""
+    from tauso.common.modifications import is_gapmer
+
+    low, high = ASO_LENGTH_RANGE
+    if not low <= len(chemical_pattern) <= high:
+        return f"The sugar pattern is {len(chemical_pattern)} long; the model covers {low}–{high}."
+    unknown = sorted(set(chemical_pattern) - set(SUGAR_CODES))
+    if unknown:
+        return f"The sugar pattern may only use {', '.join(SUGAR_CODES)} — found {', '.join(unknown)}."
+    if not is_gapmer(chemical_pattern):
+        return "The sugar pattern must be a gapmer: a run of d flanked by modified sugars on both sides."
+    if len(ps_pattern) != len(chemical_pattern) - 1:
+        return (
+            f"The backbone describes the bonds between sugars, so it must be "
+            f"{len(chemical_pattern) - 1} long, not {len(ps_pattern)}."
+        )
+    unknown = sorted(set(ps_pattern) - set(LINKAGE_CODES))
+    if unknown:
+        return f"The backbone may only use {' or '.join(LINKAGE_CODES)} — found {', '.join(unknown)}."
+    return None
+
 
 @dataclass
 class JobConfig:
@@ -58,7 +100,18 @@ class JobConfig:
     source_info: str
     user_email: str
     cell_line: Optional[str] = None
-    chemistry: str = DEFAULT_CHEMISTRY
+    chemical_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["pattern"]
+    ps_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["ps_pattern"]
+    transfection: str = "Gymnosis"
+    dosage_nm: int = DEFAULT_DOSAGE_NM
+    cell_density: int = DEFAULT_CELL_DENSITY
+
+    @property
+    def modification(self) -> str:
+        """The MOE hybridization features look for "MOE" in this string while the cEt features key
+        off 'C' in the sugar pattern, so it is derived from the pattern rather than chosen apart."""
+        wings = set(self.chemical_pattern) - {"d"}
+        return f"{'MOE' if 'M' in wings else 'cEt' if 'C' in wings else 'LNA'}/5-methylcytosines/deoxy"
 
 
 def execute_tauso_pipeline(config: JobConfig):
@@ -66,26 +119,29 @@ def execute_tauso_pipeline(config: JobConfig):
     per-candidate sequence off-target hits. Runs in an isolated background process."""
     logger.info(
         f"Design job for {config.user_email} | gene={config.target_mrna_name} | "
-        f"cell_line={config.cell_line} | chemistry={config.chemistry}"
+        f"cell_line={config.cell_line} | sugars={config.chemical_pattern} | "
+        f"transfection={config.transfection} | {config.dosage_nm} nM | {config.cell_density} cells/well"
     )
     send_processing_started(config.user_email, config.source_info)
 
     try:
-        chemistry = CHEMISTRIES[config.chemistry]
         design_config = default_config()
-        design_config.standard_chemical_pattern = chemistry["pattern"]
-        design_config.standard_ps_pattern = chemistry["ps_pattern"]
-        design_config.standard_modification = chemistry["modification"]
+        design_config.standard_chemical_pattern = config.chemical_pattern
+        design_config.standard_ps_pattern = config.ps_pattern
+        design_config.standard_modification = config.modification
+        design_config.transfection_method = config.transfection
+        design_config.volume = config.dosage_nm
+        design_config.cell_per_well = config.cell_density
 
         # Tile candidate ASOs across the target, featurize them, and score with the bundled model.
         # A DB-gene selection leaves target_data empty -> the target is looked up from the genome cache.
-        # The oligo length comes from the chemistry: several features return NaN unless the sugar
+        # The oligo length comes from the sugar pattern: several features return NaN unless the
         # pattern is exactly as long as the ASO.
         ranked, off_targets = design_asos(
             config.target_mrna_name,
             gene_sequence=(config.target_data or None),
             cell_line=config.cell_line,
-            aso_sizes=[len(chemistry["pattern"])],
+            aso_sizes=[len(config.chemical_pattern)],
             config=design_config,
             first_n=FIRST_N,
             top_n=TOP_N,

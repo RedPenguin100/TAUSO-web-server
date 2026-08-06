@@ -58,6 +58,7 @@ WORKDIR /app
 
 # Copy your local UI scripts into the container
 COPY *.py entrypoint.sh ./
+COPY .streamlit ./.streamlit
 
 # Set permissions for the entrypoint
 RUN chmod +x /app/entrypoint.sh
