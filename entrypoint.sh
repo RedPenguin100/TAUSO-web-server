@@ -4,15 +4,10 @@ set -e
 
 mkdir -p "$TAUSO_DATA_DIR"
 
-# 1. RACCESS INSTALLATION
-# Because raccess cannot be legally redistributed, we compile it at runtime.
-# We check for the executable explicitly because it lives outside the persistent volume.
-if [ ! -f "$RACCESS_EXE" ]; then
-    echo "raccess binary not found. Compiling from source..."
-    tauso setup-raccess
-else
-    echo "raccess is already compiled."
-fi
+# 1. raccess cannot be legally redistributed, so it is built from source into the persistent
+# volume. The command compares the pinned commit and the installed binary and no-ops when both
+# already match, so it is cheap to run on every boot.
+tauso setup-raccess
 
 # 2. The trained booster is not shipped in the package; it is fetched from Zenodo into the
 # persistent volume. The command verifies the md5 and skips the download when it is already there.
