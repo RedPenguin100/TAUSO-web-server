@@ -3,6 +3,7 @@ import io
 import zipfile
 import base64
 import logging
+from html import escape
 from dotenv import load_dotenv
 import brevo_python
 from brevo_python.rest import ApiException
@@ -12,6 +13,9 @@ load_dotenv(".env.local")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 FROM_NAME = os.getenv("FROM_NAME")
+
+# Keep a runaway exception message from bloating the failure email.
+REASON_MAX_CHARS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +86,17 @@ def send_processing_completed(to_email: str, source_info: str, results_files: li
     </div>
     """
     send_mail(to_email, "TAUSO Analysis Complete", html, attachments=results_files)
+
+def send_processing_failed(to_email: str, source_info: str, reason: str):
+    """Tell the submitter their run produced no results. `reason` is summarised rather than a
+    traceback, which would expose server internals to whoever submitted the job."""
+    html = f"""
+    <div style="font-family: Arial, sans-serif;">
+      <h2>Analysis Failed</h2>
+      <p>Your TAUSO run stopped before producing results.</p>
+      <p><strong>Source:</strong> {escape(source_info)}</p>
+      <p><strong>Reason:</strong> {escape(reason[:REASON_MAX_CHARS])}</p>
+      <p>The failure has been logged. Re-submitting is worth trying if the cause was transient.</p>
+    </div>
+    """
+    send_mail(to_email, "TAUSO Analysis Failed", html)

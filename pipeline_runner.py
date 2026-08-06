@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
-from email_service import send_processing_completed, send_processing_started
+from email_service import send_processing_completed, send_processing_failed, send_processing_started
 from tauso.aso_generation import design_asos, summarize_design, tox_details
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -78,6 +78,9 @@ def execute_tauso_pipeline(config: JobConfig):
 
     except Exception as e:
         logger.exception(f"Design job failed for {config.user_email}: {e}")
+        # The submitter has already had the "started" mail, so without this they would wait on a
+        # result that is never coming.
+        send_processing_failed(config.user_email, config.source_info, f"{type(e).__name__}: {e}")
 
 
 def trigger_background_job(config: JobConfig):
