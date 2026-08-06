@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from email_service import send_processing_completed, send_processing_started
-from tauso.aso_generation import design_asos, design_details, summarize_design
+from tauso.aso_generation import design_asos, summarize_design, tox_details
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"Ranked {len(ranked)} candidate ASOs; building result tables...")
 
         designed = summarize_design(ranked)
-        safety = design_details(ranked)
+        safety = tox_details(ranked)
 
         name = config.target_mrna_name
         results_files = [
