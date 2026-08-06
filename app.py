@@ -1,11 +1,8 @@
 import streamlit as st
 import io
-import sqlite3
 import os
 import json
-import tauso
 from pipeline_runner import trigger_background_job, JobConfig
-from pyfaidx import Fasta
 
 import hashlib
 from Bio import SeqIO

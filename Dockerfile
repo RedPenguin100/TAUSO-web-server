@@ -16,9 +16,11 @@ USER $MAMBA_USER
 # ==========================================
 # 1. WORKSPACE SETUP (Code & Data)
 # ==========================================
-# Define the overarching workspace and the specific data subfolder
+# The workspace holds the TAUSO source. The data directory is the mount point the compose
+# file binds the persistent volume to, and the default app.py and cache_genes.py fall back
+# to, so all three name the same path.
 ENV TAUSO_WORKSPACE=/home/mambauser/tauso_workspace
-ENV TAUSO_DATA_DIR=$TAUSO_WORKSPACE/data
+ENV TAUSO_DATA_DIR=/home/mambauser/.tauso_data
 
 # Set working directory strictly for the TAUSO source code
 WORKDIR $TAUSO_WORKSPACE/code

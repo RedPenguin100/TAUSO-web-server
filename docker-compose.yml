@@ -1,6 +1,23 @@
 services:
   tauso-web:
     build: .
+
+    # Bring the service back if the process exits -- a failed setup step kills the
+    # entrypoint, and without this the container simply stays down.
+    restart: unless-stopped
+
+    # Streamlit's own readiness endpoint. start_period covers a first boot, where the
+    # setup chain downloads and builds the whole data directory before the UI exists.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30m
+      retries: 3
+
+    # A design job holds the genome and transcriptomes in memory; this bounds it well
+    # above what one job needs while leaving the host usable.
+    mem_limit: 16g
     ports:
       - "8501:8501"
     volumes:
