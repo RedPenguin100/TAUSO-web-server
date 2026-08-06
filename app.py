@@ -89,8 +89,8 @@ def main():
     selected_cell_line = st.selectbox("Cell Line (Optional)", ["None", "HEK293", "HeLa"])
     if selected_cell_line == "None":
         st.caption(
-            "No cell-line conditioning: cell-specific off-target scores are left missing, codon usage "
-            "falls back to the cross-cell-line consensus, and half-life to the gene-level average."
+            "No cell metadata: some features revert to NaN or to a default. "
+            "For detail, see TAUSO Supplementary Material S1."
         )
     # The selection is passed through as a string. "None" is TAUSO's no-cell-line sentinel, which the
     # half-life, codon-usage and off-target features each handle explicitly. A Python None would instead
