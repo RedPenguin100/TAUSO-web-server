@@ -15,6 +15,11 @@ st.set_page_config(
     layout="centered"
 )
 
+# Heading row in the cell-line list. Only human lines are offered today; TAUSO also supports mouse,
+# so the list is grouped by organism from the start.
+ORGANISM_HEADING = "human  ››"
+
+
 @st.cache_data(ttl=3600)
 def fetch_genes():
     db_path = os.path.join(os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "available_genes.json")
@@ -23,6 +28,37 @@ def fetch_genes():
 
     with open(db_path, "r") as f:
         return json.load(f)
+
+
+@st.cache_data(ttl=3600)
+def fetch_cell_lines():
+    """Cell lines this deployment can actually condition on: the expression files present in the
+    data directory, named so that design_asos resolves them. A DepMap id whose expression was never
+    downloaded, or whose name TAUSO cannot resolve, is left out rather than offered and ignored."""
+    from tauso.data.consts import CELL_LINE_TO_DEPMAP, CELL_LINE_TO_DEPMAP_PROXY_DICT, resolve_depmap_id
+
+    expression_dir = os.path.join(
+        os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "processed_expression"
+    )
+    if not os.path.isdir(expression_dir):
+        return []
+    available = {f.replace("_expression.csv", "") for f in os.listdir(expression_dir)}
+
+    # Several dataset spellings map to one DepMap id; collect them so each line is offered once.
+    names_by_id = {}
+    for name in CELL_LINE_TO_DEPMAP_PROXY_DICT:
+        depmap_id = resolve_depmap_id(name)
+        if depmap_id in available:
+            names_by_id.setdefault(depmap_id, []).append(name)
+
+    canonical = {v: k for k, v in CELL_LINE_TO_DEPMAP.items()}
+    chosen = []
+    for depmap_id, names in names_by_id.items():
+        preferred = canonical.get(depmap_id)
+        # The canonical spelling is the one to show when it resolves; punctuation differences do
+        # not matter to the lookup, but some canonical names have no entry of their own.
+        chosen.append(preferred if preferred and resolve_depmap_id(preferred) == depmap_id else min(names, key=len))
+    return sorted(chosen)
 
 
 def parse_fasta_input(raw_text: str):
@@ -86,7 +122,14 @@ def main():
 
     st.divider()
 
-    selected_cell_line = st.selectbox("Cell Line (Optional)", ["None", "HEK293", "HeLa"])
+    # The organism heading groups the list; it carries no cell line, so selecting it means the same
+    # as "None". Streamlit has no option groups, and its selectbox filters as you type.
+    cell_lines = fetch_cell_lines()
+    selected_cell_line = st.selectbox(
+        "Supported Cell Line (Optional)", ["None", ORGANISM_HEADING] + cell_lines
+    )
+    if selected_cell_line == ORGANISM_HEADING:
+        selected_cell_line = "None"
     if selected_cell_line == "None":
         st.caption(
             "No cell metadata: some features revert to NaN or to a default. "
