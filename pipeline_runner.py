@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from email_service import send_processing_completed, send_processing_failed, send_processing_started
-from tauso.aso_generation import design_asos, summarize_design, tox_details
+from tauso.aso_generation import default_config, design_asos, summarize_design, tox_details
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,6 +27,27 @@ OFFTARGET_MAX_DISTANCE = int(os.environ.get("TAUSO_OFFTARGET_MAX_DISTANCE", "2")
 # Single isolated background process queue: submit returns instantly, keeping the UI responsive.
 executor = ProcessPoolExecutor(max_workers=1)
 
+# Gapmer chemistries offered to the user. `pattern` is TAUSO's per-sugar code -- 'M' 2'-MOE,
+# 'C' cEt, 'd' deoxy -- and its length is the ASO length, so each chemistry designs the oligo
+# length its wing geometry implies: 5-10-5 for 2'-MOE, 3-10-3 for cEt. `ps_pattern` is one
+# character per inter-nucleotide linkage, so one shorter than the oligo; '*' is phosphorothioate.
+# `modification` gates the MOE-specific hybridization features, which look for "MOE" in it,
+# while the cEt features key off 'C' in the pattern.
+CHEMISTRIES = {
+    "2'-MOE": {
+        "pattern": "MMMMMddddddddddMMMMM",
+        "modification": "MOE/5-methylcytosines/deoxy",
+    },
+    "cEt": {
+        "pattern": "CCCddddddddddCCC",
+        "modification": "cEt/5-methylcytosines/deoxy",
+    },
+}
+for _spec in CHEMISTRIES.values():
+    _spec["ps_pattern"] = "*" * (len(_spec["pattern"]) - 1)
+
+DEFAULT_CHEMISTRY = "2'-MOE"
+
 
 @dataclass
 class JobConfig:
@@ -37,24 +58,35 @@ class JobConfig:
     source_info: str
     user_email: str
     cell_line: Optional[str] = None
+    chemistry: str = DEFAULT_CHEMISTRY
 
 
 def execute_tauso_pipeline(config: JobConfig):
     """Design ASOs for the target end-to-end and email the ranked results, safety detail, and
     per-candidate sequence off-target hits. Runs in an isolated background process."""
     logger.info(
-        f"Design job for {config.user_email} | gene={config.target_mrna_name} | cell_line={config.cell_line}"
+        f"Design job for {config.user_email} | gene={config.target_mrna_name} | "
+        f"cell_line={config.cell_line} | chemistry={config.chemistry}"
     )
     send_processing_started(config.user_email, config.source_info)
 
     try:
+        chemistry = CHEMISTRIES[config.chemistry]
+        design_config = default_config()
+        design_config.standard_chemical_pattern = chemistry["pattern"]
+        design_config.standard_ps_pattern = chemistry["ps_pattern"]
+        design_config.standard_modification = chemistry["modification"]
+
         # Tile candidate ASOs across the target, featurize them, and score with the bundled model.
         # A DB-gene selection leaves target_data empty -> the target is looked up from the genome cache.
+        # The oligo length comes from the chemistry: several features return NaN unless the sugar
+        # pattern is exactly as long as the ASO.
         ranked, off_targets = design_asos(
             config.target_mrna_name,
             gene_sequence=(config.target_data or None),
             cell_line=config.cell_line,
-            aso_sizes=[20],
+            aso_sizes=[len(chemistry["pattern"])],
+            config=design_config,
             first_n=FIRST_N,
             top_n=TOP_N,
             n_jobs=DESIGN_JOBS,

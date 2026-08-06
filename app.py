@@ -2,7 +2,7 @@ import streamlit as st
 import io
 import os
 import json
-from pipeline_runner import trigger_background_job, JobConfig
+from pipeline_runner import CHEMISTRIES, trigger_background_job, JobConfig
 
 import hashlib
 from Bio import SeqIO
@@ -16,7 +16,10 @@ st.set_page_config(
 )
 
 # TAUSO also has a mouse genome, but every cell line with expression data here is human.
-SUPPORTED_ORGANISMS = ["human"]
+ORGANISM = "human"
+
+# Label for the no-cell-line option, set apart from the real cell lines around it.
+NO_CELL_LINE = "— None (no cell metadata) —"
 
 
 @st.cache_data(ttl=3600)
@@ -99,6 +102,11 @@ def main():
     st.markdown("**Predictive modeling for Antisense Oligonucleotide (ASO) efficacy.**")
     st.divider()
 
+    # Organism is the first choice: it decides which genome the target is read from and which cell
+    # lines exist. Only human is supported, so it is shown rather than offered.
+    st.markdown(f"**Organism:** {ORGANISM}")
+    st.caption("Only human is supported at the moment.")
+
     st.write("Please choose your input method below to begin the analysis pipeline.")
 
     # Fetch the genes on load
@@ -125,23 +133,31 @@ def main():
 
     st.divider()
 
-    # Organism first, then the cell lines belonging to it.
-    organism_column, cell_line_column = st.columns(2)
-    with organism_column:
-        selected_organism = st.selectbox("Organism", SUPPORTED_ORGANISMS)
+    cell_line_column, chemistry_column = st.columns(2)
     with cell_line_column:
+        # Streamlit cannot style one option of a selectbox, so "None" is set apart by its label.
         selected_cell_line = st.selectbox(
-            "Supported Cell Line (Optional)", ["None"] + fetch_cell_lines(selected_organism)
+            "Supported Cell Line (Optional)",
+            [NO_CELL_LINE] + fetch_cell_lines(ORGANISM),
         )
-    if selected_cell_line == "None":
-        st.caption(
-            "No cell metadata: some features revert to NaN or to a default. "
-            "For detail, see TAUSO Supplementary Material S1."
+    with chemistry_column:
+        selected_chemistry = st.selectbox("Chemistry", list(CHEMISTRIES))
+    if selected_cell_line == NO_CELL_LINE:
+        st.markdown(
+            ":orange[**No cell metadata:** some features revert to NaN or to a default. "
+            "For detail, see TAUSO Supplementary Material S1.]"
         )
-    # The selection is passed through as a string. "None" is TAUSO's no-cell-line sentinel, which the
-    # half-life, codon-usage and off-target features each handle explicitly. A Python None would instead
-    # leave design_asos on its default cell line, T24.
-    user_cell_line = selected_cell_line
+
+    chemistry = CHEMISTRIES[selected_chemistry]
+    st.caption(
+        f"{len(chemistry['pattern'])}-mer · sugars `{chemistry['pattern']}` · "
+        f"backbone `{chemistry['ps_pattern']}` (full phosphorothioate)"
+    )
+
+    # "None" is TAUSO's no-cell-line sentinel and is passed through as that string: the half-life,
+    # codon-usage and off-target features each handle it explicitly, while a Python None would leave
+    # design_asos on its own default cell line, T24.
+    user_cell_line = "None" if selected_cell_line == NO_CELL_LINE else selected_cell_line
 
 
     # <-- 2. NEW EMAIL INPUT
@@ -192,6 +208,7 @@ def main():
             source_info=source_info,
             user_email=user_email,
             cell_line=user_cell_line,
+            chemistry=selected_chemistry,
         )
 
         # --- Processing UI ---
