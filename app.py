@@ -15,9 +15,8 @@ st.set_page_config(
     layout="centered"
 )
 
-# Heading row in the cell-line list. Only human lines are offered today; TAUSO also supports mouse,
-# so the list is grouped by organism from the start.
-ORGANISM_HEADING = "human  ››"
+# TAUSO also has a mouse genome, but every cell line with expression data here is human.
+SUPPORTED_ORGANISMS = ["human"]
 
 
 @st.cache_data(ttl=3600)
@@ -31,11 +30,15 @@ def fetch_genes():
 
 
 @st.cache_data(ttl=3600)
-def fetch_cell_lines():
-    """Cell lines this deployment can actually condition on: the expression files present in the
-    data directory, named so that design_asos resolves them. A DepMap id whose expression was never
-    downloaded, or whose name TAUSO cannot resolve, is left out rather than offered and ignored."""
+def fetch_cell_lines(organism: str):
+    """Cell lines of `organism` this deployment can actually condition on: the expression files
+    present in the data directory, named so that design_asos resolves them. A DepMap id whose
+    expression was never downloaded, or whose name TAUSO cannot resolve, is left out rather than
+    offered and ignored."""
     from tauso.data.consts import CELL_LINE_TO_DEPMAP, CELL_LINE_TO_DEPMAP_PROXY_DICT, resolve_depmap_id
+
+    if organism != "human":
+        return []
 
     expression_dir = os.path.join(
         os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "processed_expression"
@@ -122,14 +125,14 @@ def main():
 
     st.divider()
 
-    # The organism heading groups the list; it carries no cell line, so selecting it means the same
-    # as "None". Streamlit has no option groups, and its selectbox filters as you type.
-    cell_lines = fetch_cell_lines()
-    selected_cell_line = st.selectbox(
-        "Supported Cell Line (Optional)", ["None", ORGANISM_HEADING] + cell_lines
-    )
-    if selected_cell_line == ORGANISM_HEADING:
-        selected_cell_line = "None"
+    # Organism first, then the cell lines belonging to it.
+    organism_column, cell_line_column = st.columns(2)
+    with organism_column:
+        selected_organism = st.selectbox("Organism", SUPPORTED_ORGANISMS)
+    with cell_line_column:
+        selected_cell_line = st.selectbox(
+            "Supported Cell Line (Optional)", ["None"] + fetch_cell_lines(selected_organism)
+        )
     if selected_cell_line == "None":
         st.caption(
             "No cell metadata: some features revert to NaN or to a default. "
