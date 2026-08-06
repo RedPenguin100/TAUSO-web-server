@@ -70,7 +70,7 @@ def send_processing_started(to_email: str, source_info: str):
     <div style="font-family: Arial, sans-serif;">
       <h2>Pipeline Initialized</h2>
       <p>We've started processing your sequence via TAUSO.</p>
-      <p><strong>Source:</strong> {source_info}</p>
+      <p><strong>Source:</strong> {escape(source_info)}</p>
       <p>You will receive another email once the ASO efficacy prediction is complete.</p>
     </div>
     """
@@ -81,7 +81,7 @@ def send_processing_completed(to_email: str, source_info: str, results_files: li
     <div style="font-family: Arial, sans-serif;">
       <h2>Analysis Complete! 🎉</h2>
       <p>Your TAUSO ASO efficacy predictions are ready.</p>
-      <p><strong>Source:</strong> {source_info}</p>
+      <p><strong>Source:</strong> {escape(source_info)}</p>
       <p>Please find your results attached in the zip file.</p>
     </div>
     """
