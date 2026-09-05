@@ -15,7 +15,6 @@ from pipeline_runner import (
     ACCESSIBILITY_FEATURE,
     HYBRIDIZATION_FEATURE,
     RNASE_FEATURE,
-    RNASE_MOTIF_FEATURE,
     describe_chemistry,
     DESIGN_LENGTH_RANGE,
     CELL_DENSITY_RANGE,
@@ -252,7 +251,7 @@ def _track(data, field, label, title):
                 legend=alt.Legend(
                     title=title, orient="left", direction="horizontal",
                     gradientLength=90, gradientThickness=8, titleLimit=150,
-                    labelFontSize=9, titleFontSize=10, format=".3~s",
+                    labelFontSize=9, titleFontSize=10, format=".3~g",
                 ),
             ),
             tooltip=[
@@ -295,9 +294,7 @@ def _position_chart(designed, score_column):
         # tight end of the scale.
         rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding", "binding dG (kcal/mol)"))
     if RNASE_FEATURE in data:
-        rows.append(_track(data, RNASE_FEATURE, "RNase H1 cut", "RNase H1 cleavage"))
-    if RNASE_MOTIF_FEATURE in data:
-        rows.append(_track(data, RNASE_MOTIF_FEATURE, "RNase H1 motif", "RNase H1 motif fit"))
+        rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
 
     return alt.vconcat(*rows, spacing=4).resolve_scale(x="shared", color="independent")
 
@@ -341,7 +338,8 @@ def results_page(job_id: str):
     designed = pd.read_csv(jobs.results_path(job_id, "designed_asos.csv"))
     safety = pd.read_csv(jobs.results_path(job_id, "safety_detail.csv"))
     off_targets = pd.read_csv(jobs.results_path(job_id, "off_targets.csv"))
-    score_column = designed.columns[-1]
+    # Named, not positional: the explanatory feature columns are appended after it.
+    score_column = next(c for c in designed.columns if c.startswith("tauso_score_"))
 
     chemistry = describe_chemistry(
         parameters.get("chemical_pattern", ""), parameters.get("ps_pattern", "")
@@ -385,10 +383,7 @@ def results_page(job_id: str):
             "score": merged[score_column].round(2),
             "open": accessibility.round(2) if accessibility is not None else None,
             "binding": binding.round(1) if binding is not None else None,
-            "RNase H1 cut": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
-            "RNase H1 motif": (
-                merged[RNASE_MOTIF_FEATURE].round(2) if RNASE_MOTIF_FEATURE in merged else None
-            ),
+            "RNase H1": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
             "liabilities": merged.apply(_liability_chips, axis=1),
             "1mm": one_mismatch,
             "2mm": two_mismatch,
@@ -398,8 +393,7 @@ def results_page(job_id: str):
     st.caption(
         "**open** is how unpaired the target site is over a 60-nt window; **binding** is the "
         "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
-        "**RNase H1 cut** is the predicted cleavage rate there and **RNase H1 motif** how well the "
-        "local dinucleotide context suits the enzyme. "
+        "**RNase H1** is how well the local dinucleotide context suits the enzyme that cuts. "
         "**1mm** and **2mm** count genomic hits to a gene other than the target."
     )
 

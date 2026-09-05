@@ -88,8 +88,7 @@ DEFAULT_CELL_DENSITY = 20000
 # the DNA:RNA duplex free energy, which is computed for every chemistry rather than only for MOE.
 ACCESSIBILITY_FEATURE = "fold_access_60flank_20access_4-6-8seed_sizes"
 HYBRIDIZATION_FEATURE = "hybr_dna_rna_dg"
-RNASE_FEATURE = "rnase_krel_score_R4a_krel_dynamic"
-RNASE_MOTIF_FEATURE = "rnase_score_dinucleotide_R4a_dinuc_dynamic"
+RNASE_FEATURE = "rnase_score_dinucleotide_R4a_dinuc_dynamic"
 
 # design_asos tiles a window at every position of the target before any of them are scored, so the
 # target length sets how much memory the job needs up front. The longest human mRNA is around
@@ -216,12 +215,7 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"Ranked {len(ranked)} candidate ASOs; building result tables...")
 
         designed = summarize_design(ranked)
-        for column in (
-            ACCESSIBILITY_FEATURE,
-            HYBRIDIZATION_FEATURE,
-            RNASE_FEATURE,
-            RNASE_MOTIF_FEATURE,
-        ):
+        for column in (ACCESSIBILITY_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE):
             if column in ranked.columns:
                 designed[column] = ranked[column].to_numpy()
         safety = tox_details(ranked)

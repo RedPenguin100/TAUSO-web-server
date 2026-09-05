@@ -72,8 +72,8 @@ def _design():
     assert len(ranked) == 5, f"expected 5 candidates, got {len(ranked)}"
     designed, safety = summarize_design(ranked), tox_details(ranked)
     assert len(designed) == 5 and len(safety) == 5
-    score = designed[designed.columns[-1]]
-    assert score.notna().all(), "some candidates scored NaN"
+    score_column = next(c for c in designed.columns if c.startswith("tauso_score_"))
+    assert designed[score_column].notna().all(), "some candidates scored NaN"
     return f"{len(designed)} scored, {len(designed.columns)} + {len(safety.columns)} result columns"
 
 
@@ -110,6 +110,22 @@ def _patterns():
     assert describe_pattern_problem("MMMMMddddddddddMMMMM", "*" * 20), "a wrong-length backbone passed"
     assert describe_pattern_problem("MMMMMMMMMMMMMMMMMMMM", "*" * 19), "a non-gapmer passed"
     return f"{len(CHEMISTRIES)} chemistries accepted, bad patterns rejected"
+
+
+@check("the results page finds the score column, not a feature")
+def _score_column():
+    import pandas as pd
+
+    import jobs
+    import pipeline_runner as runner
+
+    # The explanatory features are appended after the score, so position is not enough to find it.
+    frame = pd.DataFrame(
+        columns=["rank", "tauso_score_v1", runner.ACCESSIBILITY_FEATURE, runner.RNASE_FEATURE]
+    )
+    found = next(c for c in frame.columns if c.startswith("tauso_score_"))
+    assert found == "tauso_score_v1", found
+    return f"{found}, ahead of {len(frame.columns) - 2} feature columns"
 
 
 @check("a job survives being written and read back")
