@@ -77,6 +77,20 @@ def mark(job_id: str, status: str, error: str = None) -> None:
         )
 
 
+def fail_interrupted() -> int:
+    """Fail every job still marked queued or running, and return how many.
+
+    Jobs run in a pool inside the server process, so nothing survives a restart. Anything left in
+    flight when the process went down is gone, and saying so is better than a page that waits for
+    a result no one is computing."""
+    with _connect() as connection:
+        cursor = connection.execute(
+            "UPDATE jobs SET status = ?, finished_at = ?, error = ? WHERE status IN (?, ?)",
+            (FAILED, _now(), "The server restarted while this job was running.", QUEUED, RUNNING),
+        )
+        return cursor.rowcount
+
+
 def get(job_id: str) -> dict:
     """The job with this id, or None. `parameters` comes back as a dict."""
     with _connect() as connection:

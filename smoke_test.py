@@ -125,7 +125,12 @@ def _job_store():
     assert finished["parameters"]["cell_line"] == "A549"
     assert finished["finished_at"], "a finished job should record when"
     assert jobs.public_url(job_id).endswith(job_id)
-    return f"{job_id} queued -> running -> failed, parameters and url intact"
+
+    stranded = jobs.create("SMOKE", "smoke test", "smoke@local", {})
+    jobs.mark(stranded, jobs.RUNNING)
+    jobs.fail_interrupted()
+    assert jobs.get(stranded)["status"] == jobs.FAILED, "a job left running should not stay running"
+    return f"{job_id} queued -> running -> failed; an interrupted job is failed on restart"
 
 
 def _design_config(runner, config):

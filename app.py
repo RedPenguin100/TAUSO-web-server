@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -13,6 +14,8 @@ import jobs
 from pipeline_runner import (
     ACCESSIBILITY_FEATURE,
     HYBRIDIZATION_FEATURE,
+    RNASE_FEATURE,
+    RNASE_MOTIF_FEATURE,
     describe_chemistry,
     DESIGN_LENGTH_RANGE,
     CELL_DENSITY_RANGE,
@@ -46,6 +49,12 @@ CHEMISTRY_COLOURS = {"2'-MOE": "#2A78D6", "cEt": "#EB6834"}
 def _sugar_code(pattern: str) -> str:
     """The single modified-sugar code in a gapmer pattern."""
     return next((c for c in pattern if c != "d"), "M")
+
+
+@st.cache_resource
+def _clear_interrupted_jobs():
+    """Once per server process: nothing in flight survived the restart that got us here."""
+    return jobs.fail_interrupted()
 
 
 @st.cache_data(ttl=3600)
@@ -223,6 +232,76 @@ def conditions_section():
 
 
 
+# One scale for every track: red at the low end of the values, green at the high end.
+TRACK_RANGE = ["#cf4c41", "#e9b23c", "#4aa058"]
+
+
+def _track(data, field, label, title):
+    """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
+    of the values, green at the high end."""
+    colours = TRACK_RANGE
+    return (
+        alt.Chart(data.assign(track=label))
+        .mark_circle(size=110)
+        .encode(
+            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
+            y=alt.Y("track:N", axis=None),
+            color=alt.Color(
+                f"{field}:Q",
+                scale=alt.Scale(range=colours),
+                legend=alt.Legend(
+                    title=title, orient="left", direction="horizontal",
+                    gradientLength=90, gradientThickness=8, titleLimit=150,
+                    labelFontSize=9, titleFontSize=10, format=".3~s",
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("rank:Q"),
+                alt.Tooltip("target_start:Q", title="start"),
+                alt.Tooltip(f"{field}:Q", title=title, format=".2f"),
+            ],
+        )
+        .properties(height=44)
+    )
+
+
+def _position_chart(designed, score_column):
+    """Score against transcript position, with the structure and binding of each candidate on their
+    own rows beneath, sharing the x scale so a column of marks is one candidate."""
+    data = designed.copy()
+    scatter = (
+        alt.Chart(data)
+        .mark_circle(size=70, opacity=0.85, color="#2A78D6")
+        .encode(
+            x=alt.X("target_start:Q", title=None, scale=alt.Scale(zero=False, nice=False)),
+            # The scores of a shortlist sit close together, so the axis follows them rather than
+            # reaching down to zero and flattening the differences.
+            y=alt.Y(f"{score_column}:Q", title="score", scale=alt.Scale(zero=False, nice=True)),
+            tooltip=[
+                alt.Tooltip("rank:Q"),
+                alt.Tooltip("aso_sequence:N", title="sequence"),
+                alt.Tooltip("target_start:Q", title="start"),
+                alt.Tooltip(f"{score_column}:Q", title="score", format=".2f"),
+            ],
+        )
+        .properties(height=230)
+    )
+
+    rows = [scatter]
+    if ACCESSIBILITY_FEATURE in data:
+        rows.append(_track(data, ACCESSIBILITY_FEATURE, "open", "open site"))
+    if HYBRIDIZATION_FEATURE in data:
+        # Free energy in kcal/mol, as measured: the more negative, the tighter, and red marks the
+        # tight end of the scale.
+        rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding", "binding dG (kcal/mol)"))
+    if RNASE_FEATURE in data:
+        rows.append(_track(data, RNASE_FEATURE, "RNase H1 cut", "RNase H1 cleavage"))
+    if RNASE_MOTIF_FEATURE in data:
+        rows.append(_track(data, RNASE_MOTIF_FEATURE, "RNase H1 motif", "RNase H1 motif fit"))
+
+    return alt.vconcat(*rows, spacing=4).resolve_scale(x="shared", color="independent")
+
+
 def _liability_chips(row):
     """The flags worth scrutinising on one candidate, as short labels."""
     chips = []
@@ -233,30 +312,6 @@ def _liability_chips(row):
     if (row.get("offtarget_rrna", 0) or 0) > 0:
         chips.append("rRNA")
     return ", ".join(chips) if chips else "-"
-
-
-def _blend(stops, position):
-    """A hex colour `position` of the way along `stops`, which are (offset, r, g, b)."""
-    position = min(max(position, 0.0), 1.0)
-    for (left, *low), (right, *high) in zip(stops, stops[1:]):
-        if position <= right:
-            share = 0.0 if right == left else (position - left) / (right - left)
-            return "#%02x%02x%02x" % tuple(round(a + (b - a) * share) for a, b in zip(low, high))
-    return "#%02x%02x%02x" % tuple(stops[-1][1:])
-
-
-# Structure: red where the site is paired shut, green where it is open.
-FOLDING_STOPS = [(0.0, 214, 90, 78), (0.5, 232, 176, 68), (1.0, 74, 160, 88)]
-# Binding: faint blue for weak, orange in the middle, red for strong.
-BINDING_STOPS = [(0.0, 168, 199, 231), (0.5, 232, 140, 60), (1.0, 197, 62, 55)]
-
-
-def _scale(values):
-    """Where each value sits between the smallest and largest here, 0 to 1."""
-    low, high = values.min(), values.max()
-    if not (high > low):
-        return values * 0 + 0.5
-    return (values - low) / (high - low)
 
 
 def results_page(job_id: str):
@@ -302,9 +357,11 @@ def results_page(job_id: str):
     st.subheader("Score along the transcript")
     st.caption(
         "Each point is one candidate, placed where it binds. Higher is better predicted knockdown "
-        "relative to the others here — it ranks candidates, it is not a percent."
+        "relative to the others here — it ranks candidates, it is not a percent. The tracks beneath "
+        "carry the same candidates. Red is the low end of each scale and green the high end, so a "
+        "red **binding** mark is the most negative free energy, meaning the tightest duplex."
     )
-    st.scatter_chart(designed, x="target_start", y=score_column, height=260)
+    st.altair_chart(_position_chart(designed, score_column), use_container_width=True)
 
     starts = designed.head(10)["target_start"].sort_values().tolist()
     if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):
@@ -328,31 +385,22 @@ def results_page(job_id: str):
             "score": merged[score_column].round(2),
             "open": accessibility.round(2) if accessibility is not None else None,
             "binding": binding.round(1) if binding is not None else None,
+            "RNase H1 cut": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
+            "RNase H1 motif": (
+                merged[RNASE_MOTIF_FEATURE].round(2) if RNASE_MOTIF_FEATURE in merged else None
+            ),
             "liabilities": merged.apply(_liability_chips, axis=1),
             "1mm": one_mismatch,
             "2mm": two_mismatch,
         }
     ).dropna(axis=1, how="all")
-    shown = table.style
-    if "open" in table:
-        # More negative accessibility means a more tightly paired site, so the scale is inverted.
-        openness = _scale(-table["open"])
-        shown = shown.apply(
-            lambda column: [f"background-color:{_blend(FOLDING_STOPS, v)}" for v in openness], subset=["open"]
-        )
-    if "binding" in table:
-        # Free energy: the more negative, the stronger the duplex.
-        strength = _scale(-table["binding"])
-        shown = shown.apply(
-            lambda column: [f"background-color:{_blend(BINDING_STOPS, v)}" for v in strength], subset=["binding"]
-        )
-    st.dataframe(shown, hide_index=True, use_container_width=True)
+    st.dataframe(table, hide_index=True, use_container_width=True)
     st.caption(
-        "**open** is how unpaired the target site is over a 60-nt window — green is open and "
-        "reachable, red is folded shut. **binding** is the DNA:RNA duplex free energy in kcal/mol — "
-        "red binds strongly, blue weakly. Both are shaded against the other candidates in this run, "
-        "not against some absolute scale. **1mm** and **2mm** count genomic hits to a gene other "
-        "than the target, at one and two mismatches."
+        "**open** is how unpaired the target site is over a 60-nt window; **binding** is the "
+        "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
+        "**RNase H1 cut** is the predicted cleavage rate there and **RNase H1 motif** how well the "
+        "local dinucleotide context suits the enzyme. "
+        "**1mm** and **2mm** count genomic hits to a gene other than the target."
     )
 
     st.subheader("Downloads")
@@ -365,6 +413,7 @@ def results_page(job_id: str):
 
 
 def main():
+    _clear_interrupted_jobs()
     opened = st.query_params.get("job")
     if opened:
         results_page(opened)
