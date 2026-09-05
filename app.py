@@ -13,6 +13,7 @@ from pipeline_runner import (
     DEFAULT_CHEMISTRY,
     DEFAULT_DOSAGE_NM,
     DOSAGE_RANGE_NM,
+    MAX_TARGET_LENGTH,
     TRANSFECTION_METHODS,
     JobConfig,
     describe_pattern_problem,
@@ -197,6 +198,12 @@ def main():
         return
     if not email or "@" not in email:
         st.error("Enter an email address — results are delivered by email.")
+        return
+    if target_sequence and len(target_sequence) > MAX_TARGET_LENGTH:
+        st.error(
+            f"That sequence is {len(target_sequence):,} nt. The limit is {MAX_TARGET_LENGTH:,} — "
+            "longer than any human transcript, so this is usually a paste that went wrong."
+        )
         return
     problem = describe_pattern_problem(sugar, backbone)
     if problem:

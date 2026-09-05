@@ -1,6 +1,7 @@
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,7 +26,18 @@ TOP_N = int(os.environ.get("TAUSO_TOP_N", "100"))
 OFFTARGET_MAX_DISTANCE = int(os.environ.get("TAUSO_OFFTARGET_MAX_DISTANCE", "2"))
 
 # Single isolated background process queue: submit returns instantly, keeping the UI responsive.
-executor = ProcessPoolExecutor(max_workers=1)
+# It is created on demand rather than held for the life of the process: a worker that dies abruptly
+# -- an OOM kill, or a segfault in one of the native libraries -- leaves the pool permanently broken,
+# while Streamlit itself stays up and healthy, so nothing else would notice.
+_executor = None
+
+
+def _get_executor():
+    global _executor
+    if _executor is None:
+        _executor = ProcessPoolExecutor(max_workers=1)
+    return _executor
+
 
 # Gapmer chemistries offered to the user. `pattern` is TAUSO's per-sugar code -- 'M' 2'-MOE,
 # 'C' cEt, 'd' deoxy -- and its length is the ASO length, so each chemistry designs the oligo
@@ -64,6 +76,12 @@ DOSAGE_RANGE_NM = (2, 20000)
 DEFAULT_DOSAGE_NM = 4000
 CELL_DENSITY_RANGE = (85, 300000)
 DEFAULT_CELL_DENSITY = 20000
+
+# design_asos tiles a window at every position of the target before any of them are scored, so the
+# target length sets how much memory the job needs up front. The longest human mRNA is around
+# 110 kb, so this accepts any real transcript while keeping a pasted mistake from taking the worker
+# down -- which would break the pool for every job after it.
+MAX_TARGET_LENGTH = 200000
 
 
 def describe_pattern_problem(chemical_pattern: str, ps_pattern: str) -> Optional[str]:
@@ -171,6 +189,24 @@ def execute_tauso_pipeline(config: JobConfig):
         send_processing_failed(config.user_email, config.source_info, f"{type(e).__name__}: {e}")
 
 
+def _report_lost_job(config: JobConfig, future):
+    """A job that raises inside execute_tauso_pipeline mails the user from there. This covers the
+    other case: the worker process dying, which takes that handler down with it."""
+    try:
+        future.result()
+    except Exception as e:
+        logger.exception(f"Design job for {config.user_email} was lost with the worker: {e}")
+        send_processing_failed(config.user_email, config.source_info, f"{type(e).__name__}: {e}")
+
+
 def trigger_background_job(config: JobConfig):
     """Submit the config to the background pool and return immediately."""
-    executor.submit(execute_tauso_pipeline, config)
+    global _executor
+    try:
+        future = _get_executor().submit(execute_tauso_pipeline, config)
+    except BrokenProcessPool:
+        logger.warning("The background pool was broken by an earlier job; starting a new one.")
+        _executor.shutdown(wait=False)
+        _executor = None
+        future = _get_executor().submit(execute_tauso_pipeline, config)
+    future.add_done_callback(lambda finished: _report_lost_job(config, finished))
