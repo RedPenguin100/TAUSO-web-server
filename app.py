@@ -28,7 +28,7 @@ ORGANISM = "human"
 # Label for the no-cell-line option, set apart from the real cell lines around it.
 NO_CELL_LINE = "— None (no cell metadata) —"
 
-GENE_PLACEHOLDER = "Search a gene…"
+GENE_PLACEHOLDER = "Gene name, e.g. MALAT1"
 
 
 @st.cache_data(ttl=3600)
@@ -76,6 +76,25 @@ def fetch_cell_lines(organism: str):
     return sorted(chosen)
 
 
+@st.cache_data(ttl=3600)
+def fetch_gene_index(name_upper: str):
+    """The gene with this name, matched without regard to case, or None."""
+    return {gene.upper(): gene for gene in fetch_genes()}.get(name_upper)
+
+
+@st.cache_data(ttl=3600)
+def suggest_genes(query: str, limit: int = 8):
+    """Gene names to offer when the typed one is not a name itself: those starting with it first,
+    then those merely containing it."""
+    query = query.upper()
+    genes = fetch_genes()
+    starts = [g for g in genes if g.upper().startswith(query)]
+    if len(starts) >= limit:
+        return starts[:limit]
+    contains = [g for g in genes if query in g.upper() and g not in starts]
+    return (starts + contains)[:limit]
+
+
 def parse_fasta_input(raw_text: str):
     """Parse pasted or uploaded FASTA into (name, sequence). The name carries a hash of the
     sequence so two different sequences under one header stay distinguishable downstream."""
@@ -110,11 +129,22 @@ def target_section():
         if not genes:
             st.error("The gene database is not initialised yet.")
             return None, None, None
-        gene = st.selectbox(
-            "Gene", [GENE_PLACEHOLDER] + genes, label_visibility="collapsed"
-        )
-        if gene == GENE_PLACEHOLDER:
+
+        # A text box rather than a list of every gene: the reference holds tens of thousands, and
+        # putting them all in a select control makes the browser render the lot whenever the filter
+        # is cleared.
+        query = st.text_input("Gene", placeholder=GENE_PLACEHOLDER, label_visibility="collapsed")
+        query = query.strip()
+        if not query:
             return None, None, None
+
+        gene = fetch_gene_index(query.upper())
+        if gene is None:
+            matches = suggest_genes(query)
+            if not matches:
+                st.warning(f"No gene named {query!r}. Names come from the GRCh38 annotation.")
+                return None, None, None
+            gene = st.radio(f"Did you mean:", matches, horizontal=True)
         return gene, "", f"Selected Gene: {gene}"
 
     pasted = st.text_area(
