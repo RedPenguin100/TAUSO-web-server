@@ -1,0 +1,13 @@
+[theme]
+# Pinned rather than following the viewer's OS setting, so the app looks the same for everyone.
+# An off-white with a slight cool cast, deep slate ink, and one blue reserved for the primary action.
+base = "light"
+backgroundColor = "#FBFCFD"
+secondaryBackgroundColor = "#ECEFF4"
+textColor = "#141A22"
+primaryColor = "#2A78D6"
+font = "sans serif"
+
+[server]
+# The upload path only ever receives a FASTA of one transcript.
+maxUploadSize = 10

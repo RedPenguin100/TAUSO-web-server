@@ -1,3 +1,6 @@
 *.idea
 .tauso_data
 *.env.local
+.venv
+__pycache__/
+*.pyc

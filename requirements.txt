@@ -1,0 +1,8 @@
+# Web-server pip dependencies, installed on top of the TAUSO conda environment.
+# TAUSO itself (and its conda stack: RIsearch, raccess, pyranges, gffutils, ...) is
+# installed separately from its pinned source -- see the Dockerfile.
+streamlit
+watchdog
+python-dotenv
+brevo-python<4.0.0
+biopython

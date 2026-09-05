@@ -16,23 +16,31 @@ USER $MAMBA_USER
 # ==========================================
 # 1. WORKSPACE SETUP (Code & Data)
 # ==========================================
-# Define the overarching workspace and the specific data subfolder
+# The workspace holds the TAUSO source. The data directory is the mount point the compose
+# file binds the persistent volume to, and the default app.py and cache_genes.py fall back
+# to, so all three name the same path.
 ENV TAUSO_WORKSPACE=/home/mambauser/tauso_workspace
-ENV TAUSO_DATA_DIR=$TAUSO_WORKSPACE/data
+ENV TAUSO_DATA_DIR=/home/mambauser/.tauso_data
 
 # Set working directory strictly for the TAUSO source code
 WORKDIR $TAUSO_WORKSPACE/code
 
-ARG CACHEBUST=7
-RUN git clone --depth 1 -b mk/model_execution2 --sparse https://github.com/RedPenguin100/TAUSO.git . && \
-    git sparse-checkout set --no-cone '/*' '!/notebooks/' && \
+# Pin the TAUSO source to a specific main commit for reproducible builds.
+ARG TAUSO_COMMIT=69e829efd2be3bbb9af72862bf2a5bd1a33ac17f
+RUN git init -q . && \
+    git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
+    git config core.sparseCheckout true && \
+    printf '/*\n!/notebooks/\n!/tests/\n' > .git/info/sparse-checkout && \
+    git fetch --depth 1 origin ${TAUSO_COMMIT} && \
+    git checkout -q FETCH_HEAD && \
     git submodule update --init --recursive
 
 # Install dependencies and the TAUSO package natively
 RUN micromamba install -y -n base -f environment.yml && \
     micromamba clean --all --yes
 
-RUN micromamba run -n base uv pip install --system . streamlit watchdog python-dotenv "brevo-python<4.0.0" biopython
+COPY requirements.txt ./
+RUN micromamba run -n base uv pip install --system . -r requirements.txt
 
 # Add the protobuf fallback environment variable
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
@@ -50,6 +58,10 @@ WORKDIR /app
 
 # Copy your local UI scripts into the container
 COPY *.py entrypoint.sh ./
+COPY .streamlit ./.streamlit
+COPY components ./components
+# The gene list is written here at boot, so the runtime user owns the directory.
+RUN chown -R $MAMBA_USER /app/components
 
 # Set permissions for the entrypoint
 RUN chmod +x /app/entrypoint.sh
