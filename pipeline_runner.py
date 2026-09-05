@@ -65,6 +65,10 @@ SUGAR_CODES = "MCLd"
 LINKAGE_CODES = "*o"
 # The model is not calibrated outside the ASO lengths seen in training.
 ASO_LENGTH_RANGE = (12, 28)
+# The lengths offered for design. Narrower than what the model accepts: a gapmer keeps a 10-nt
+# DNA gap, so these are the lengths whose wings come out at 3-7 nt either side.
+DESIGN_LENGTH_RANGE = (16, 24)
+DNA_GAP = 10
 
 # Delivery methods offered. TAUSO also accepts "Other", which is the catch-all the training data
 # uses for cohorts whose method was never recorded -- not something a user can meaningfully pick.
@@ -120,9 +124,11 @@ class JobConfig:
     cell_line: Optional[str] = None
     chemical_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["pattern"]
     ps_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["ps_pattern"]
-    transfection: str = "Gymnosis"
-    dosage_nm: int = DEFAULT_DOSAGE_NM
-    cell_density: int = DEFAULT_CELL_DENSITY
+    # Left unset, these reach the model as missing. Around an eighth of the training experiments
+    # record none of them, so the booster has a branch for each.
+    transfection: Optional[str] = None
+    dosage_nm: Optional[int] = None
+    cell_density: Optional[int] = None
 
     @property
     def modification(self) -> str:
@@ -147,9 +153,11 @@ def execute_tauso_pipeline(config: JobConfig):
         design_config.standard_chemical_pattern = config.chemical_pattern
         design_config.standard_ps_pattern = config.ps_pattern
         design_config.standard_modification = config.modification
+        # An unrecognised transfection label one-hot encodes to NaN, which is how "not recorded"
+        # is spelled for all three of these.
         design_config.transfection_method = config.transfection
-        design_config.volume = config.dosage_nm
-        design_config.cell_per_well = config.cell_density
+        design_config.volume = float("nan") if config.dosage_nm is None else config.dosage_nm
+        design_config.cell_per_well = float("nan") if config.cell_density is None else config.cell_density
 
         # Tile candidate ASOs across the target, featurize them, and score with the bundled model.
         # A DB-gene selection leaves target_data empty -> the target is looked up from the genome cache.

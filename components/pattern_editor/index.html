@@ -1,0 +1,167 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  :root {
+    --surface:#FBFCFD; --ink:#141A22; --ink-2:#515C6B; --ink-3:#8792A2; --rule:#DFE4EC;
+    --dna:#9AA5B4; --ps:#141A22;
+    --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:var(--font); color:var(--ink); background:var(--surface);
+         user-select:none; -webkit-user-select:none; }
+  svg { display:block; width:100%; height:auto; touch-action:none; }
+  .sugar { cursor:pointer; }
+  .sugar-ring { fill:none; stroke:#fff; stroke-width:2; }
+  .bond { cursor:pointer; }
+  .tick, .side { fill:var(--ink-3); font-size:9px; font-family:var(--mono); }
+  .legend { display:flex; gap:1rem; align-items:center; font-size:.74rem; color:var(--ink-2); margin-bottom:.5rem; }
+  .legend span { display:inline-flex; align-items:center; gap:.35rem; }
+  .sw { width:11px; height:11px; border-radius:50%; display:inline-block; }
+  .sw.hollow { background:#fff; border:1.5px solid var(--ps); }
+  .readout { margin-top:.55rem; font-family:var(--mono); font-size:.74rem; color:var(--ink-2);
+             display:flex; gap:1.1rem; flex-wrap:wrap; }
+  .readout b { color:var(--ink); font-weight:600; }
+  .warn { color:#C0392F; }
+</style>
+
+<div class="legend" id="legend"></div>
+<svg id="canvas" role="application" aria-label="Sugar and backbone editor"></svg>
+<div class="readout">
+  <span>sugars <b id="r-sugar"></b></span>
+  <span>backbone <b id="r-bone"></b></span>
+  <span id="r-note"></span>
+</div>
+
+<script>
+let sugars = [], bonds = [], code = "M", colour = "#2A78D6", label = "2'-MOE", drag = null;
+
+const DNA_GAP = 10;
+function gapmer(n) {
+  // The gap stays 10 nt; an odd length puts the extra sugar on the 5' wing.
+  const spare = Math.max(2, n - DNA_GAP);
+  const wing5 = Math.ceil(spare / 2), wing3 = spare - wing5;
+  return Array.from({length:n}, (_, i) => (i < wing5 || i >= n - wing3) ? code : "d");
+}
+function setLength(n) {
+  sugars = gapmer(n);
+  bonds = Array(Math.max(0, n - 1)).fill("*");
+}
+function isGapmer(a) {
+  const s = a.join(""), m = s.match(/d+/g);
+  if (!m) return false;
+  const longest = m.reduce((x,y) => y.length > x.length ? y : x);
+  const at = s.indexOf(longest);
+  return at > 0 && at + longest.length < s.length;
+}
+
+function drawLegend() {
+  document.getElementById("legend").innerHTML =
+    `<span><i class="sw" style="background:${colour}"></i>${label}</span>` +
+    `<span><i class="sw" style="background:var(--dna)"></i>DNA gap</span>` +
+    `<span><i class="sw" style="background:var(--ps)"></i>phosphorothioate</span>` +
+    `<span><i class="sw hollow"></i>phosphodiester</span>`;
+}
+
+function draw() {
+  const n = sugars.length, R = 13, GAP = 13, PADL = 34, PADR = 16, RPS = 6.5;
+  const step = 2*R + GAP;
+  const W = PADL + PADR + n*2*R + (n-1)*GAP, H = 96;
+  const cx = i => PADL + R + i*step;
+  const yPS = 24, ySugar = 58;
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}">`;
+
+  out += `<text class="side" x="4" y="${yPS+4}">PS</text>`;
+  for (let i = 0; i < n - 1; i++) {
+    const x1 = cx(i) + R, x2 = cx(i+1) - R;
+    out += `<line x1="${x1}" y1="${ySugar}" x2="${x2}" y2="${ySugar}" stroke="var(--rule)" stroke-width="3" pointer-events="none"/>`;
+  }
+  for (let i = 0; i < n - 1; i++) {
+    const mx = cx(i) + R + GAP/2, ps = bonds[i] === "*";
+    out += `<line x1="${mx}" y1="${yPS+RPS}" x2="${mx}" y2="${ySugar-R}" stroke="var(--rule)" stroke-width="1.5" pointer-events="none"/>`;
+    out += `<circle class="bond" data-bond="${i}" cx="${mx}" cy="${yPS}" r="${RPS}"
+             fill="${ps ? 'var(--ps)' : '#fff'}" stroke="var(--ps)" stroke-width="1.5"/>`;
+  }
+  for (let i = 0; i < n; i++) {
+    out += `<circle class="sugar" data-sugar="${i}" cx="${cx(i)}" cy="${ySugar}" r="${R}"
+             fill="${sugars[i] === 'd' ? 'var(--dna)' : colour}"/>`;
+    out += `<circle class="sugar-ring" cx="${cx(i)}" cy="${ySugar}" r="${R}" pointer-events="none"/>`;
+    if (i === 0 || i === n-1 || (i+1) % 5 === 0)
+      out += `<text class="tick" x="${cx(i)}" y="${ySugar+R+14}" text-anchor="middle" pointer-events="none">${i+1}</text>`;
+  }
+  document.getElementById("canvas").outerHTML = out.replace("<svg xmlns", '<svg id="canvas" xmlns') + "</svg>";
+  bind();
+  report();
+}
+
+function report() {
+  const s = sugars.join(""), b = bonds.join("");
+  document.getElementById("r-sugar").textContent = s;
+  document.getElementById("r-bone").textContent = b;
+  const ok = isGapmer(sugars);
+  const note = document.getElementById("r-note");
+  note.textContent = ok ? `${sugars.length}-mer · ${b.split("*").length-1}/${b.length} PS`
+                        : "not a gapmer — needs a DNA run with modified sugars on both sides";
+  note.className = ok ? "" : "warn";
+  send({sugar:s, backbone:b, valid:ok});
+}
+
+function paintSugar(i,v){ if(sugars[i]!==v){ sugars[i]=v; draw(); } }
+function paintBond(i,v){ if(bonds[i]!==v){ bonds[i]=v; draw(); } }
+
+function bind() {
+  const svg = document.getElementById("canvas");
+  svg.querySelectorAll("[data-sugar]").forEach(el=>{
+    const i = +el.dataset.sugar;
+    el.addEventListener("pointerdown", e=>{
+      e.preventDefault();
+      const v = sugars[i] === "d" ? code : "d";   // a click turns the sugar into DNA and back
+      drag={kind:"sugar", value:v}; paintSugar(i, v);
+    });
+    el.addEventListener("pointerenter", ()=>{ if(drag&&drag.kind==="sugar") paintSugar(i, drag.value); });
+  });
+  svg.querySelectorAll("[data-bond]").forEach(el=>{
+    const i = +el.dataset.bond;
+    el.addEventListener("pointerdown", e=>{
+      e.preventDefault();
+      const v = bonds[i]==="*" ? "o" : "*";
+      drag={kind:"bond", value:v}; paintBond(i,v);
+    });
+    el.addEventListener("pointerenter", ()=>{ if(drag&&drag.kind==="bond") paintBond(i,drag.value); });
+  });
+}
+window.addEventListener("pointerup", ()=>{ drag=null; });
+
+function post(msg){ window.parent.postMessage(Object.assign({isStreamlitMessage:true}, msg), "*"); }
+let last = null;
+function send(value){
+  const key = JSON.stringify(value);
+  if (key === last) return;
+  last = key;
+  post({type:"streamlit:setComponentValue", value, dataType:"json"});
+}
+function fit(){ post({type:"streamlit:setFrameHeight", height: document.body.scrollHeight + 8}); }
+
+let started = false;
+window.addEventListener("message", e=>{
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  const a = e.data.args || {};
+  const chemistryChanged = a.code && a.code !== code;
+  code = a.code || code; colour = a.colour || colour; label = a.label || label;
+
+  if (!started) {
+    started = true;
+    if (a.sugar && a.sugar.length === (a.length || 20)) {
+      sugars = a.sugar.split("");
+      bonds = (a.backbone || "").padEnd(a.sugar.length - 1, "*").slice(0, a.sugar.length - 1).split("");
+    } else setLength(a.length || 20);
+  } else if (chemistryChanged) {
+    sugars = sugars.map(x => x === "d" ? "d" : code);
+  } else if (a.length && a.length !== sugars.length) {
+    setLength(a.length);
+  } else return;
+
+  drawLegend(); draw(); fit();
+});
+post({type:"streamlit:componentReady", apiVersion:1});
+</script>

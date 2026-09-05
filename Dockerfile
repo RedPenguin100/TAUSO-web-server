@@ -59,6 +59,9 @@ WORKDIR /app
 # Copy your local UI scripts into the container
 COPY *.py entrypoint.sh ./
 COPY .streamlit ./.streamlit
+COPY components ./components
+# The gene list is written here at boot, so the runtime user owns the directory.
+RUN chown -R $MAMBA_USER /app/components
 
 # Set permissions for the entrypoint
 RUN chmod +x /app/entrypoint.sh

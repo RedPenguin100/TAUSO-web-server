@@ -2,11 +2,14 @@ import hashlib
 import io
 import json
 import os
+from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from Bio import SeqIO
 
 from pipeline_runner import (
+    DESIGN_LENGTH_RANGE,
     CELL_DENSITY_RANGE,
     CHEMISTRIES,
     DEFAULT_CELL_DENSITY,
@@ -22,13 +25,29 @@ from pipeline_runner import (
 
 st.set_page_config(page_title="TAUSO | ASO design", layout="centered")
 
+_pattern_editor = components.declare_component(
+    "pattern_editor", path=str(Path(__file__).parent / "components" / "pattern_editor")
+)
+
 # TAUSO also has a mouse genome, but every cell line with expression data here is human.
 ORGANISM = "human"
 
-# Label for the no-cell-line option, set apart from the real cell lines around it.
-NO_CELL_LINE = "— None (no cell metadata) —"
+GENE_PLACEHOLDER = "Search a gene"
 
-GENE_PLACEHOLDER = "Gene name, e.g. MALAT1"
+# One colour per modified sugar, matching the circles the editor draws.
+CHEMISTRY_COLOURS = {"2'-MOE": "#2A78D6", "cEt": "#EB6834"}
+
+
+def _sugar_code(pattern: str) -> str:
+    """The single modified-sugar code in a gapmer pattern."""
+    return next((c for c in pattern if c != "d"), "M")
+
+
+def _wing_gap_wing(pattern: str) -> str:
+    """The gapmer geometry as wing-gap-wing, e.g. 5-10-5."""
+    runs = [len(r) for r in pattern.replace("d", " ").split()]
+    deoxy = len(pattern) - sum(runs)
+    return f"{runs[0]}-{deoxy}-{runs[-1]}" if len(runs) >= 2 else str(len(pattern))
 
 
 @st.cache_data(ttl=3600)
@@ -76,25 +95,6 @@ def fetch_cell_lines(organism: str):
     return sorted(chosen)
 
 
-@st.cache_data(ttl=3600)
-def fetch_gene_index(name_upper: str):
-    """The gene with this name, matched without regard to case, or None."""
-    return {gene.upper(): gene for gene in fetch_genes()}.get(name_upper)
-
-
-@st.cache_data(ttl=3600)
-def suggest_genes(query: str, limit: int = 8):
-    """Gene names to offer when the typed one is not a name itself: those starting with it first,
-    then those merely containing it."""
-    query = query.upper()
-    genes = fetch_genes()
-    starts = [g for g in genes if g.upper().startswith(query)]
-    if len(starts) >= limit:
-        return starts[:limit]
-    contains = [g for g in genes if query in g.upper() and g not in starts]
-    return (starts + contains)[:limit]
-
-
 def parse_fasta_input(raw_text: str):
     """Parse pasted or uploaded FASTA into (name, sequence). The name carries a hash of the
     sequence so two different sequences under one header stay distinguishable downstream."""
@@ -129,22 +129,11 @@ def target_section():
         if not genes:
             st.error("The gene database is not initialised yet.")
             return None, None, None
-
-        # A text box rather than a list of every gene: the reference holds tens of thousands, and
-        # putting them all in a select control makes the browser render the lot whenever the filter
-        # is cleared.
-        query = st.text_input("Gene", placeholder=GENE_PLACEHOLDER, label_visibility="collapsed")
-        query = query.strip()
-        if not query:
-            return None, None, None
-
-        gene = fetch_gene_index(query.upper())
+        gene = st.selectbox(
+            "Gene", genes, index=None, placeholder=GENE_PLACEHOLDER, label_visibility="collapsed"
+        )
         if gene is None:
-            matches = suggest_genes(query)
-            if not matches:
-                st.warning(f"No gene named {query!r}. Names come from the GRCh38 annotation.")
-                return None, None, None
-            gene = st.radio(f"Did you mean:", matches, horizontal=True)
+            return None, None, None
         return gene, "", f"Selected Gene: {gene}"
 
     pasted = st.text_area(
@@ -165,39 +154,74 @@ def target_section():
 
 
 def conditions_section():
-    """Chemistry and assay conditions. Every one of these is a model input, so the defaults are
-    stated rather than hidden: the sugar/backbone pair defines the oligo, and transfection, dosage
-    and cell density describe the experiment the prediction is conditioned on."""
-    preset_column, transfection_column = st.columns([2, 2])
-    with preset_column:
-        preset_name = st.selectbox("Chemistry", list(CHEMISTRIES), index=list(CHEMISTRIES).index(DEFAULT_CHEMISTRY))
-    with transfection_column:
-        transfection = st.selectbox("Transfection", TRANSFECTION_METHODS)
+    """The oligo, then the assay. Every one of these is a model input, so the defaults are stated
+    rather than hidden: the sugar/backbone pair defines the oligo, while transfection, dosage, cell
+    density and cell line describe the experiment the prediction is conditioned on."""
+    chemistry_column, edit_column = st.columns([3, 2])
+    with chemistry_column:
+        preset_name = st.segmented_control(
+            "Chemistry", list(CHEMISTRIES), default=DEFAULT_CHEMISTRY
+        ) or DEFAULT_CHEMISTRY
+    with edit_column:
+        st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+        editing = st.toggle("Edit sugars and backbone")
 
     preset = CHEMISTRIES[preset_name]
-    sugar_column, backbone_column = st.columns([2, 2])
-    with sugar_column:
-        sugar = st.text_input("Sugar", value=preset["pattern"], key=f"sugar_{preset_name}")
-    with backbone_column:
-        backbone = st.text_input("Backbone", value=preset["ps_pattern"], key=f"backbone_{preset_name}")
+    sugar, backbone = preset["pattern"], preset["ps_pattern"]
+    st.caption(f"{len(sugar)}-mer {_wing_gap_wing(sugar)} {preset_name}, full phosphorothioate.")
 
-    dosage_column, density_column = st.columns([2, 2])
+    if editing:
+        low, high = DESIGN_LENGTH_RANGE
+        length = st.slider("Length (nt)", min_value=low, max_value=high, value=len(preset["pattern"]))
+        edited = _pattern_editor(
+            length=length,
+            code=_sugar_code(preset["pattern"]),
+            colour=CHEMISTRY_COLOURS[preset_name],
+            label=preset_name,
+            sugar=preset["pattern"] if length == len(preset["pattern"]) else None,
+            backbone=preset["ps_pattern"] if length == len(preset["pattern"]) else None,
+            key="pattern_editor",
+            default={"sugar": preset["pattern"], "backbone": preset["ps_pattern"]},
+        )
+        sugar = (edited or {}).get("sugar") or sugar
+        backbone = (edited or {}).get("backbone") or backbone
+        st.caption(
+            "Click a sugar to swap it with DNA, or drag across several. The row above is the "
+            "backbone: filled is phosphorothioate, hollow is phosphodiester. "
+            "\\* One modified chemistry per oligo — mixmers are not supported yet."
+        )
+
+    # These four describe the experiment the prediction is conditioned on rather than the oligo.
+    # Each may be left blank, which reaches the model as missing rather than as a made-up value.
+    st.markdown("**Experimental conditions** &nbsp;·&nbsp; *optional*", unsafe_allow_html=True)
+    transfection_column, cell_line_column = st.columns(2)
+    with transfection_column:
+        transfection = st.selectbox(
+            "Transfection", TRANSFECTION_METHODS, index=None, placeholder="Not specified"
+        )
+    with cell_line_column:
+        cell_line = st.selectbox(
+            "Cell line", fetch_cell_lines(ORGANISM), index=None, placeholder="Not specified"
+        )
+
+    dosage_column, density_column = st.columns(2)
     with dosage_column:
         dosage = st.number_input(
             "Dosage (nM)", min_value=DOSAGE_RANGE_NM[0], max_value=DOSAGE_RANGE_NM[1],
-            value=DEFAULT_DOSAGE_NM, step=100,
+            value=None, step=100, placeholder="Not specified",
         )
     with density_column:
         density = st.number_input(
             "Cells per well", min_value=CELL_DENSITY_RANGE[0], max_value=CELL_DENSITY_RANGE[1],
-            value=DEFAULT_CELL_DENSITY, step=1000,
+            value=None, step=1000, placeholder="Not specified",
         )
 
     st.caption(
-        f"{len(sugar)}-mer · M 2'-MOE · C cEt · L LNA · d DNA · ∗ phosphorothioate. "
-        "Defaults are the median of the training experiments."
+        "The model predicts the best sequences from the information it has. "
+        "The more you give it, the better the sequences."
     )
-    return sugar, backbone, transfection, int(dosage), int(density)
+
+    return sugar, backbone, transfection, dosage, density, cell_line
 
 
 def main():
@@ -207,16 +231,7 @@ def main():
     target_name, target_sequence, source_info = target_section()
 
     with st.container(border=True):
-        sugar, backbone, transfection, dosage, density = conditions_section()
-
-        cell_line = st.selectbox(
-            "Cell line (optional)", [NO_CELL_LINE] + fetch_cell_lines(ORGANISM)
-        )
-        if cell_line == NO_CELL_LINE:
-            st.markdown(
-                ":orange[**No cell metadata:** some features revert to NaN or to a default. "
-                "For detail, see TAUSO Supplementary Material S1.]"
-            )
+        sugar, backbone, transfection, dosage, density, cell_line = conditions_section()
 
     email = st.text_input("Email for results", placeholder="you@lab.org")
 
@@ -249,7 +264,7 @@ def main():
             target_data=target_sequence,
             source_info=source_info,
             user_email=email,
-            cell_line="None" if cell_line == NO_CELL_LINE else cell_line,
+            cell_line="None" if cell_line is None else cell_line,
             chemical_pattern=sugar,
             ps_pattern=backbone,
             transfection=transfection,
