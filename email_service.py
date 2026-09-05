@@ -76,16 +76,20 @@ def send_processing_started(to_email: str, source_info: str):
     """
     send_mail(to_email, "TAUSO Pipeline Started", html)
 
-def send_processing_completed(to_email: str, source_info: str, results_files: list):
+def send_processing_completed(to_email: str, source_info: str, results_url: str):
+    """Point the submitter at their results. The tables are shown on the page and downloadable
+    there, so the mail carries a link rather than an attachment."""
     html = f"""
     <div style="font-family: Arial, sans-serif;">
-      <h2>Analysis Complete! 🎉</h2>
-      <p>Your TAUSO ASO efficacy predictions are ready.</p>
+      <h2>Your ASO designs are ready</h2>
       <p><strong>Source:</strong> {escape(source_info)}</p>
-      <p>Please find your results attached in the zip file.</p>
+      <p><a href="{escape(results_url)}"
+            style="display:inline-block;padding:10px 18px;background:#2A78D6;color:#fff;
+                   border-radius:6px;text-decoration:none">View the results</a></p>
+      <p style="color:#515C6B;font-size:13px">{escape(results_url)}</p>
     </div>
     """
-    send_mail(to_email, "TAUSO Analysis Complete", html, attachments=results_files)
+    send_mail(to_email, "TAUSO designs ready", html)
 
 def send_processing_failed(to_email: str, source_info: str, reason: str):
     """Tell the submitter their run produced no results. `reason` is summarised rather than a

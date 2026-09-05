@@ -4,11 +4,16 @@ import json
 import os
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from Bio import SeqIO
 
+import jobs
 from pipeline_runner import (
+    ACCESSIBILITY_FEATURE,
+    HYBRIDIZATION_FEATURE,
+    describe_chemistry,
     DESIGN_LENGTH_RANGE,
     CELL_DENSITY_RANGE,
     CHEMISTRIES,
@@ -41,13 +46,6 @@ CHEMISTRY_COLOURS = {"2'-MOE": "#2A78D6", "cEt": "#EB6834"}
 def _sugar_code(pattern: str) -> str:
     """The single modified-sugar code in a gapmer pattern."""
     return next((c for c in pattern if c != "d"), "M")
-
-
-def _wing_gap_wing(pattern: str) -> str:
-    """The gapmer geometry as wing-gap-wing, e.g. 5-10-5."""
-    runs = [len(r) for r in pattern.replace("d", " ").split()]
-    deoxy = len(pattern) - sum(runs)
-    return f"{runs[0]}-{deoxy}-{runs[-1]}" if len(runs) >= 2 else str(len(pattern))
 
 
 @st.cache_data(ttl=3600)
@@ -168,7 +166,7 @@ def conditions_section():
 
     preset = CHEMISTRIES[preset_name]
     sugar, backbone = preset["pattern"], preset["ps_pattern"]
-    st.caption(f"{len(sugar)}-mer {_wing_gap_wing(sugar)} {preset_name}, full phosphorothioate.")
+    st.caption(f"{len(sugar)} nt · {describe_chemistry(sugar, backbone)}")
 
     if editing:
         low, high = DESIGN_LENGTH_RANGE
@@ -224,7 +222,154 @@ def conditions_section():
     return sugar, backbone, transfection, dosage, density, cell_line
 
 
+
+def _liability_chips(row):
+    """The flags worth scrutinising on one candidate, as short labels."""
+    chips = []
+    if row.get("tox_cpg_count", 0) > 0:
+        chips.append(f"CpG x{int(row['tox_cpg_count'])}")
+    if abs(row.get("tox_g4hunter_max", 0) or 0) >= 1.5 or (row.get("tox_grun_count", 0) or 0) > 0:
+        chips.append(f"G4 {row.get('tox_g4hunter_max', 0):.1f}")
+    if (row.get("offtarget_rrna", 0) or 0) > 0:
+        chips.append("rRNA")
+    return ", ".join(chips) if chips else "-"
+
+
+def _blend(stops, position):
+    """A hex colour `position` of the way along `stops`, which are (offset, r, g, b)."""
+    position = min(max(position, 0.0), 1.0)
+    for (left, *low), (right, *high) in zip(stops, stops[1:]):
+        if position <= right:
+            share = 0.0 if right == left else (position - left) / (right - left)
+            return "#%02x%02x%02x" % tuple(round(a + (b - a) * share) for a, b in zip(low, high))
+    return "#%02x%02x%02x" % tuple(stops[-1][1:])
+
+
+# Structure: red where the site is paired shut, green where it is open.
+FOLDING_STOPS = [(0.0, 214, 90, 78), (0.5, 232, 176, 68), (1.0, 74, 160, 88)]
+# Binding: faint blue for weak, orange in the middle, red for strong.
+BINDING_STOPS = [(0.0, 168, 199, 231), (0.5, 232, 140, 60), (1.0, 197, 62, 55)]
+
+
+def _scale(values):
+    """Where each value sits between the smallest and largest here, 0 to 1."""
+    low, high = values.min(), values.max()
+    if not (high > low):
+        return values * 0 + 0.5
+    return (values - low) / (high - low)
+
+
+def results_page(job_id: str):
+    """Everything one finished job produced, opened from its own address."""
+    job = jobs.get(job_id)
+    if job is None:
+        st.error(f"No job called {job_id}.")
+        st.page_link("app.py", label="Design something new")
+        return
+
+    st.title("TAUSO")
+    parameters = job["parameters"]
+
+    if job["status"] in (jobs.QUEUED, jobs.RUNNING):
+        st.info("This design is still running. The page will show the results when it finishes.")
+        if st.button("Check again"):
+            st.rerun()
+        return
+    if job["status"] == jobs.FAILED:
+        st.error("This design did not finish.")
+        st.code(job["error"] or "no reason recorded", language="text")
+        return
+    if not jobs.has_results(job_id):
+        st.error("This job is marked finished but its result tables are missing.")
+        return
+
+    designed = pd.read_csv(jobs.results_path(job_id, "designed_asos.csv"))
+    safety = pd.read_csv(jobs.results_path(job_id, "safety_detail.csv"))
+    off_targets = pd.read_csv(jobs.results_path(job_id, "off_targets.csv"))
+    score_column = designed.columns[-1]
+
+    chemistry = describe_chemistry(
+        parameters.get("chemical_pattern", ""), parameters.get("ps_pattern", "")
+    )
+    st.caption(chemistry)
+
+    top = st.columns(4)
+    top[0].metric("Candidates", len(designed))
+    top[1].metric("Length", f"{len(parameters.get('chemical_pattern', ''))} nt")
+    top[2].metric("Cell line", parameters.get("cell_line") or "none")
+    top[3].metric("Off-target hits", len(off_targets))
+
+    st.subheader("Score along the transcript")
+    st.caption(
+        "Each point is one candidate, placed where it binds. Higher is better predicted knockdown "
+        "relative to the others here — it ranks candidates, it is not a percent."
+    )
+    st.scatter_chart(designed, x="target_start", y=score_column, height=260)
+
+    starts = designed.head(10)["target_start"].sort_values().tolist()
+    if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):
+        st.warning(
+            f"The top 10 all start between {starts[0]} and {starts[-1]}. Tiling moves one nucleotide "
+            "at a time, so these overlap heavily — they are one site rather than ten choices."
+        )
+
+    st.subheader("Candidates")
+    merged = designed.merge(safety, on="aso_sequence", how="left")
+    hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
+    accessibility = merged.get(ACCESSIBILITY_FEATURE)
+    binding = merged.get(HYBRIDIZATION_FEATURE)
+    one_mismatch = merged["aso_sequence"].map(hits.get(1, {})).fillna(0).astype(int)
+    two_mismatch = merged["aso_sequence"].map(hits.get(2, {})).fillna(0).astype(int)
+    table = pd.DataFrame(
+        {
+            "#": merged["rank"],
+            "sequence (5'->3')": merged["aso_sequence"],
+            "start": merged["target_start"],
+            "score": merged[score_column].round(2),
+            "open": accessibility.round(2) if accessibility is not None else None,
+            "binding": binding.round(1) if binding is not None else None,
+            "liabilities": merged.apply(_liability_chips, axis=1),
+            "1mm": one_mismatch,
+            "2mm": two_mismatch,
+        }
+    ).dropna(axis=1, how="all")
+    shown = table.style
+    if "open" in table:
+        # More negative accessibility means a more tightly paired site, so the scale is inverted.
+        openness = _scale(-table["open"])
+        shown = shown.apply(
+            lambda column: [f"background-color:{_blend(FOLDING_STOPS, v)}" for v in openness], subset=["open"]
+        )
+    if "binding" in table:
+        # Free energy: the more negative, the stronger the duplex.
+        strength = _scale(-table["binding"])
+        shown = shown.apply(
+            lambda column: [f"background-color:{_blend(BINDING_STOPS, v)}" for v in strength], subset=["binding"]
+        )
+    st.dataframe(shown, hide_index=True, use_container_width=True)
+    st.caption(
+        "**open** is how unpaired the target site is over a 60-nt window — green is open and "
+        "reachable, red is folded shut. **binding** is the DNA:RNA duplex free energy in kcal/mol — "
+        "red binds strongly, blue weakly. Both are shaded against the other candidates in this run, "
+        "not against some absolute scale. **1mm** and **2mm** count genomic hits to a gene other "
+        "than the target, at one and two mismatches."
+    )
+
+    st.subheader("Downloads")
+    for name in jobs.RESULT_FILES:
+        path = jobs.results_path(job_id, name)
+        st.download_button(name, path.read_bytes(), file_name=f"{job['target']}_{name}", mime="text/csv")
+
+    with st.expander("What this run was"):
+        st.json({"job": job_id, "target": job["target"], **parameters})
+
+
 def main():
+    opened = st.query_params.get("job")
+    if opened:
+        results_page(opened)
+        return
+
     st.title("TAUSO")
     st.caption("Design antisense oligonucleotides against a human transcript.")
 
@@ -258,12 +403,22 @@ def main():
     # "None" is TAUSO's no-cell-line sentinel and is passed through as that string: the half-life,
     # codon-usage and off-target features each handle it explicitly, while a Python None would leave
     # design_asos on its own default cell line.
+    parameters = {
+        "cell_line": cell_line,
+        "chemical_pattern": sugar,
+        "ps_pattern": backbone,
+        "transfection": transfection,
+        "dosage_nm": dosage,
+        "cell_density": density,
+    }
+    job_id = jobs.create(target_name, source_info, email, parameters)
     trigger_background_job(
         JobConfig(
             target_mrna_name=target_name,
             target_data=target_sequence,
             source_info=source_info,
             user_email=email,
+            job_id=job_id,
             cell_line="None" if cell_line is None else cell_line,
             chemical_pattern=sugar,
             ps_pattern=backbone,
@@ -272,8 +427,12 @@ def main():
             cell_density=density,
         )
     )
-    st.success(f"Queued. Results for {source_info} will be emailed to {email}.")
-    st.caption("A run takes a few minutes. You will get an email either way, including if it fails.")
+    st.success("Queued. This page is where the results will appear.")
+    st.markdown(f"**Your results:** {jobs.public_url(job_id)}")
+    st.caption(
+        f"A run takes a few minutes. Keep the link — it is emailed to {email} when the design "
+        "finishes, and again if it fails."
+    )
 
 
 if __name__ == "__main__":

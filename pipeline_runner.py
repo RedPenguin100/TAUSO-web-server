@@ -5,6 +5,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from typing import Optional
 
+import jobs
 from email_service import send_processing_completed, send_processing_failed, send_processing_started
 from tauso.aso_generation import default_config, design_asos, summarize_design, tox_details
 
@@ -62,6 +63,7 @@ DEFAULT_CHEMISTRY = "2'-MOE"
 
 # Sugar codes TAUSO understands, and the two linkage codes: '*' phosphorothioate, 'o' phosphodiester.
 SUGAR_CODES = "MCLd"
+SUGAR_NAMES = {"M": "2'-MOE", "C": "cEt", "L": "LNA", "d": "DNA"}
 LINKAGE_CODES = "*o"
 # The model is not calibrated outside the ASO lengths seen in training.
 ASO_LENGTH_RANGE = (12, 28)
@@ -81,11 +83,43 @@ DEFAULT_DOSAGE_NM = 4000
 CELL_DENSITY_RANGE = (85, 300000)
 DEFAULT_CELL_DENSITY = 20000
 
+# Two features carried into the results so a reader can see why a site scored as it did.
+# Accessibility is how unpaired the target site is over a 60-nt window; the hybridization term is
+# the DNA:RNA duplex free energy, which is computed for every chemistry rather than only for MOE.
+ACCESSIBILITY_FEATURE = "fold_access_60flank_20access_4-6-8seed_sizes"
+HYBRIDIZATION_FEATURE = "hybr_dna_rna_dg"
+
 # design_asos tiles a window at every position of the target before any of them are scored, so the
 # target length sets how much memory the job needs up front. The longest human mRNA is around
 # 110 kb, so this accepts any real transcript while keeping a pasted mistake from taking the worker
 # down -- which would break the pool for every job after it.
 MAX_TARGET_LENGTH = 200000
+
+
+def describe_chemistry(chemical_pattern: str, ps_pattern: str) -> str:
+    """The chemistry in the terms it is normally written: wing-gap-wing, the modified sugar, and
+    how much of the backbone is phosphorothioate. A length on its own is not a chemistry."""
+    runs = [len(r) for r in chemical_pattern.replace("d", " ").split()]
+    deoxy = len(chemical_pattern) - sum(runs)
+    geometry = f"{runs[0]}-{deoxy}-{runs[-1]}" if len(runs) >= 2 else f"{len(chemical_pattern)}-mer"
+    sugar = next((SUGAR_NAMES[c] for c in chemical_pattern if c != "d"), "DNA")
+    thio = ps_pattern.count("*")
+    backbone = "full PS" if thio == len(ps_pattern) else f"{thio}/{len(ps_pattern)} PS"
+    return f"{geometry} {sugar}, {backbone}"
+
+
+def to_idt_notation(sequence: str, chemical_pattern: str, ps_pattern: str) -> Optional[str]:
+    """The IDT order string for one designed ASO, or None when the chemistry has no IDT equivalent.
+
+    TAUSO renders these; cEt is not an IDT catalogue product, so a cEt oligo has no order string and
+    raises there rather than returning something unorderable."""
+    from tauso.common.modifications import to_idt_notation as render
+
+    modification = f"{'MOE' if 'M' in chemical_pattern else 'LNA'}/5-methylcytosines/deoxy"
+    try:
+        return render(sequence, chemical_pattern, ps_pattern, modification)
+    except ValueError:
+        return None
 
 
 def describe_pattern_problem(chemical_pattern: str, ps_pattern: str) -> Optional[str]:
@@ -121,6 +155,7 @@ class JobConfig:
     target_mrna_name: str
     source_info: str
     user_email: str
+    job_id: Optional[str] = None
     cell_line: Optional[str] = None
     chemical_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["pattern"]
     ps_pattern: str = CHEMISTRIES[DEFAULT_CHEMISTRY]["ps_pattern"]
@@ -146,6 +181,7 @@ def execute_tauso_pipeline(config: JobConfig):
         f"cell_line={config.cell_line} | sugars={config.chemical_pattern} | "
         f"transfection={config.transfection} | {config.dosage_nm} nM | {config.cell_density} cells/well"
     )
+    jobs.mark(config.job_id, jobs.RUNNING)
     send_processing_started(config.user_email, config.source_info)
 
     try:
@@ -178,23 +214,30 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"Ranked {len(ranked)} candidate ASOs; building result tables...")
 
         designed = summarize_design(ranked)
+        for column in (ACCESSIBILITY_FEATURE, HYBRIDIZATION_FEATURE):
+            if column in ranked.columns:
+                designed[column] = ranked[column].to_numpy()
         safety = tox_details(ranked)
+        jobs.save_results(
+            config.job_id,
+            {
+                "designed_asos.csv": designed,
+                "safety_detail.csv": safety,
+                "off_targets.csv": off_targets,
+            },
+        )
+        jobs.mark(config.job_id, jobs.DONE)
 
-        name = config.target_mrna_name
-        results_files = [
-            (f"{name}_designed_asos.csv", designed.to_csv(index=False).encode("utf-8")),
-            (f"{name}_safety_detail.csv", safety.to_csv(index=False).encode("utf-8")),
-            (f"{name}_off_targets.csv", off_targets.to_csv(index=False).encode("utf-8")),
-        ]
-
-        send_processing_completed(config.user_email, config.source_info, results_files)
-        logger.info(f"Design job complete for {config.user_email}.")
+        send_processing_completed(config.user_email, config.source_info, jobs.public_url(config.job_id))
+        logger.info(f"Design job {config.job_id} complete for {config.user_email}.")
 
     except Exception as e:
         logger.exception(f"Design job failed for {config.user_email}: {e}")
+        reason = f"{type(e).__name__}: {e}"
+        jobs.mark(config.job_id, jobs.FAILED, error=reason)
         # The submitter has already had the "started" mail, so without this they would wait on a
         # result that is never coming.
-        send_processing_failed(config.user_email, config.source_info, f"{type(e).__name__}: {e}")
+        send_processing_failed(config.user_email, config.source_info, reason)
 
 
 def _report_lost_job(config: JobConfig, future):
@@ -204,7 +247,9 @@ def _report_lost_job(config: JobConfig, future):
         future.result()
     except Exception as e:
         logger.exception(f"Design job for {config.user_email} was lost with the worker: {e}")
-        send_processing_failed(config.user_email, config.source_info, f"{type(e).__name__}: {e}")
+        reason = f"{type(e).__name__}: {e}"
+        jobs.mark(config.job_id, jobs.FAILED, error=reason)
+        send_processing_failed(config.user_email, config.source_info, reason)
 
 
 def trigger_background_job(config: JobConfig):

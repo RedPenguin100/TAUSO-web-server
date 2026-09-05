@@ -112,6 +112,22 @@ def _patterns():
     return f"{len(CHEMISTRIES)} chemistries accepted, bad patterns rejected"
 
 
+@check("a job survives being written and read back")
+def _job_store():
+    import jobs
+
+    job_id = jobs.create("SMOKE", "smoke test", "smoke@local", {"cell_line": "A549"})
+    assert jobs.get(job_id)["status"] == jobs.QUEUED
+    jobs.mark(job_id, jobs.RUNNING)
+    jobs.mark(job_id, jobs.FAILED, error="deliberate")
+    finished = jobs.get(job_id)
+    assert finished["status"] == jobs.FAILED and finished["error"] == "deliberate"
+    assert finished["parameters"]["cell_line"] == "A549"
+    assert finished["finished_at"], "a finished job should record when"
+    assert jobs.public_url(job_id).endswith(job_id)
+    return f"{job_id} queued -> running -> failed, parameters and url intact"
+
+
 def _design_config(runner, config):
     design_config = runner.default_config()
     design_config.standard_chemical_pattern = config.chemical_pattern
