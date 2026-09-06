@@ -330,7 +330,7 @@ def _gene_model(layout, low, high):
         if b > low and a < high
     ]
     if not spans:
-        return backbone.properties(height=12, width=468)
+        return backbone.properties(height=10, width=468)
     blocks = (
         alt.Chart(pd.DataFrame(spans))
         .mark_bar(height=7)
@@ -339,7 +339,7 @@ def _gene_model(layout, low, high):
             color=alt.Color("part:N", scale=scale, legend=legend),
         )
     )
-    return alt.layer(backbone, blocks).properties(height=12, width=468)
+    return alt.layer(backbone, blocks).properties(height=10, width=468)
 
 
 def _position_chart(designed, score_column, layout=None):
@@ -388,7 +388,7 @@ def _position_chart(designed, score_column, layout=None):
                 title="position in the transcript (nt)",
                 scale=alt.Scale(zero=False, nice=False),
                 # Tight to the gene track above it, and to the tracks below.
-                axis=alt.Axis(grid=False, orient="bottom", labelPadding=1, titlePadding=1,
+                axis=alt.Axis(grid=False, orient="bottom", labelPadding=12, titlePadding=2,
                               labelFontSize=10, titleFontSize=11),
             )
         )
@@ -399,7 +399,7 @@ def _position_chart(designed, score_column, layout=None):
     rows.append(
         alt.Chart(data.head(1)).mark_point(opacity=0).encode(
             x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False))
-        ).properties(height=26, width=468)
+        ).properties(height=40, width=468)
     )
     for field, label in (
         (ACCESSIBILITY_FEATURE, "open site"),
