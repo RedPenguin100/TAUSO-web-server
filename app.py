@@ -236,33 +236,37 @@ def conditions_section():
 TRACK_RANGE = ["#cf4c41", "#e9b23c", "#4aa058"]
 
 
-def _track(data, field, label, title):
+def _track(data, field, label):
     """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
-    of the values, green at the high end."""
+    of the values, green at the high end. `label` names the row on the axis."""
     colours = TRACK_RANGE
     return (
         alt.Chart(data.assign(track=label))
         .mark_circle(size=110)
         .encode(
             x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
-            y=alt.Y("track:N", axis=None),
+            # The row name is an axis label, not a legend title: axis labels across the rows
+            # share one right edge, so the names line up where the score axis sits. The gradient
+            # is left of that.
+            y=alt.Y(
+                "track:N",
+                title=None,
+                axis=alt.Axis(domain=False, ticks=False, labelPadding=8, labelFontSize=10,
+                              labelColor="#515C6B", labelLimit=110),
+            ),
             color=alt.Color(
                 f"{field}:Q",
                 scale=alt.Scale(range=colours),
                 legend=alt.Legend(
-                    title=title, orient="left", direction="horizontal",
-                    # Title beside the gradient rather than over it, so the whole legend is one
-                    # line and sits level with the circles it explains.
-                    titleOrient="left", titleAnchor="middle", titleBaseline="middle",
-                    titleLimit=150, titlePadding=8, offset=22,
-                    gradientLength=76, gradientThickness=9,
-                    labelFontSize=9, titleFontSize=10, format=".3~g",
+                    title=None, orient="left", direction="horizontal", offset=16,
+                    gradientLength=72, gradientThickness=9,
+                    labelFontSize=9, format=".3~g",
                 ),
             ),
             tooltip=[
                 alt.Tooltip("rank:Q"),
                 alt.Tooltip("target_start:Q", title="start"),
-                alt.Tooltip(f"{field}:Q", title=title, format=".2f"),
+                alt.Tooltip(f"{field}:Q", title=label, format=".2f"),
             ],
         )
         .properties(height=36)
@@ -339,7 +343,7 @@ def _position_chart(designed, score_column, layout=None):
     # Accessibility and folding energy describe the same thing, so they are pushed together into
     # one block and the other tracks keep their spacing.
     structure = [
-        _track(data, field, label, label)
+        _track(data, field, label)
         for field, label in ((ACCESSIBILITY_FEATURE, "open site"), (MFE_FEATURE, "MFE"))
         if field in data
     ]
@@ -357,9 +361,9 @@ def _position_chart(designed, score_column, layout=None):
     if HYBRIDIZATION_FEATURE in data:
         # Free energy in kcal/mol, as measured: the more negative, the tighter, and red marks the
         # tight end of the scale.
-        rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding", "binding dG (kcal/mol)"))
+        rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding dG"))
     if RNASE_FEATURE in data:
-        rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
+        rows.append(_track(data, RNASE_FEATURE, "RNase H1"))
 
     # Flush bounds line the rows up on their plotting areas. Without it each row starts after
     # whatever sits to its left -- the score axis on one, a legend on the next -- and a column of
