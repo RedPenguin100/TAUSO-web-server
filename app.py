@@ -240,31 +240,34 @@ def _track(data, field, label):
     """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
     of the values, green at the high end.
 
-    The row carries its range in its axis label rather than a colour legend. Flush bounds, which is
-    what lines the rows up on the score axis, lays out without regard to legends, so a legend on
-    each row lands on its neighbour."""
-    values = data[field]
-    low, high = values.min(), values.max()
-    name = f"{label}  {low:.3g} to {high:.3g}"
+    Name and colour key sit to the right of the circles. The plot areas are what line the rows up
+    with the score above, so anything to the left of them would push the row out of line."""
     return (
-        alt.Chart(data.assign(track=name))
+        alt.Chart(data.assign(track=label))
         .mark_circle(size=110)
         .encode(
             x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
             y=alt.Y(
                 "track:N",
                 title=None,
-                axis=alt.Axis(domain=False, ticks=False, labelPadding=8, labelFontSize=10,
-                              labelColor="#515C6B", labelLimit=190),
+                axis=alt.Axis(orient="right", domain=False, ticks=False, labelPadding=8,
+                              labelFontSize=11, labelColor="#3D4653", labelLimit=120),
             ),
-            color=alt.Color(f"{field}:Q", scale=alt.Scale(range=TRACK_RANGE), legend=None),
+            color=alt.Color(
+                f"{field}:Q",
+                scale=alt.Scale(range=TRACK_RANGE),
+                legend=alt.Legend(
+                    title=None, orient="right", direction="horizontal", offset=6,
+                    gradientLength=70, gradientThickness=8, labelFontSize=8, format=".3~g",
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("rank:Q"),
                 alt.Tooltip("target_start:Q", title="start"),
                 alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
             ],
         )
-        .properties(height=26, width=640)
+        .properties(height=34, width=450)
     )
 
 
@@ -300,13 +303,13 @@ def _gene_model(layout, low, high):
         if b > low and a < high
     ]
     if not spans:
-        return backbone.properties(height=18, width=640)
+        return backbone.properties(height=18, width=450)
     blocks = (
         alt.Chart(pd.DataFrame(spans))
         .mark_bar(color="#3D4653", height=11)
         .encode(x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None))
     )
-    return alt.layer(backbone, blocks).properties(height=18, width=640)
+    return alt.layer(backbone, blocks).properties(height=18, width=450)
 
 
 def _position_chart(designed, score_column, layout=None):
@@ -330,10 +333,10 @@ def _position_chart(designed, score_column, layout=None):
                 alt.Tooltip(f"{score_column}:Q", title="score", format=".2f"),
             ],
         )
-        .properties(height=230, width=640)
+        .properties(height=230, width=450)
     )
     if bands is not None:
-        scatter = alt.layer(bands, scatter).properties(height=230, width=640)
+        scatter = alt.layer(bands, scatter).properties(height=230, width=450)
 
     # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
     # the ones that follow, so the grouping has to come from the order, not from nesting.
@@ -427,10 +430,10 @@ def results_page(job_id: str):
         "relative to the others here — it ranks candidates, it is not a percent. The tracks beneath "
         "carry the same candidates, each shaded red at the low end of its own range and green at "
         "the high end — so a red **binding dG** mark is the most negative free energy, the "
-        "tightest duplex. Each row gives its range beside its name."
+        "tightest duplex."
     )
     layout = jobs.get_layout(job_id)
-    st.altair_chart(_position_chart(designed, score_column, layout), use_container_width=True)
+    st.altair_chart(_position_chart(designed, score_column, layout), use_container_width=False)
     if layout:
         exonic = sum(b - a for a, b in layout["exons"])
         st.caption(
