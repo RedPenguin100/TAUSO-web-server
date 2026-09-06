@@ -18,6 +18,11 @@ QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
 # The tables a finished job leaves behind, in the order the results page shows them.
 RESULT_FILES = ["designed_asos.csv", "safety_detail.csv", "off_targets.csv"]
 
+# Every feature computed for every candidate, kept beside the results. The page does not read it;
+# it is there so a ranking can be interrogated afterwards -- why this window, why this candidate --
+# without paying for the run a second time.
+FEATURES_FILE = "features.parquet"
+
 
 def jobs_dir() -> Path:
     root = Path(os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data")) / "jobs"
@@ -116,6 +121,16 @@ def save_results(job_id: str, tables: dict) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for name, frame in tables.items():
         frame.to_csv(directory / name, index=False)
+
+
+def save_features(job_id: str, frame) -> None:
+    """Keep the full feature frame for a job."""
+    job_dir(job_id).mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(job_dir(job_id) / FEATURES_FILE, index=False)
+
+
+def features_path(job_id: str) -> Path:
+    return job_dir(job_id) / FEATURES_FILE
 
 
 def results_path(job_id: str, name: str) -> Path:

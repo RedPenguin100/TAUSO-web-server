@@ -14,6 +14,7 @@ import jobs
 from pipeline_runner import (
     ACCESSIBILITY_FEATURE,
     HYBRIDIZATION_FEATURE,
+    RBP_FEATURE,
     RNASE_FEATURE,
     describe_chemistry,
     DESIGN_LENGTH_RANGE,
@@ -295,6 +296,8 @@ def _position_chart(designed, score_column):
         rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding", "binding dG (kcal/mol)"))
     if RNASE_FEATURE in data:
         rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
+    if RBP_FEATURE in data:
+        rows.append(_track(data, RBP_FEATURE, "hnRNP A3", "hnRNP A3 affinity"))
 
     return alt.vconcat(*rows, spacing=4).resolve_scale(x="shared", color="independent")
 
@@ -384,16 +387,24 @@ def results_page(job_id: str):
             "open": accessibility.round(2) if accessibility is not None else None,
             "binding": binding.round(1) if binding is not None else None,
             "RNase H1": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
+            # Affinities run to a few ten-thousandths, so this one keeps its own format below.
+            "hnRNP A3": merged[RBP_FEATURE] if RBP_FEATURE in merged else None,
             "liabilities": merged.apply(_liability_chips, axis=1),
             "1mm": one_mismatch,
             "2mm": two_mismatch,
         }
     ).dropna(axis=1, how="all")
-    st.dataframe(table, hide_index=True, use_container_width=True)
+    st.dataframe(
+        table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"hnRNP A3": st.column_config.NumberColumn(format="%.1e")},
+    )
     st.caption(
         "**open** is how unpaired the target site is over a 60-nt window; **binding** is the "
         "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
-        "**RNase H1** is how well the local dinucleotide context suits the enzyme that cuts. "
+        "**RNase H1** is how well the local dinucleotide context suits the enzyme that cuts; "
+        "**hnRNP A3** is how strongly that protein binds the same site. "
         "**1mm** and **2mm** count genomic hits to a gene other than the target."
     )
 

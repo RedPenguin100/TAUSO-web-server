@@ -89,6 +89,8 @@ DEFAULT_CELL_DENSITY = 20000
 ACCESSIBILITY_FEATURE = "fold_access_60flank_20access_4-6-8seed_sizes"
 HYBRIDIZATION_FEATURE = "hybr_dna_rna_dg"
 RNASE_FEATURE = "rnase_score_dinucleotide_R4a_dinuc_dynamic"
+# hnRNP A3 binds the target site too, so its affinity says who else is competing for it.
+RBP_FEATURE = "rbp_hnrnpa3_aff_5"
 
 # design_asos tiles a window at every position of the target before any of them are scored, so the
 # target length sets how much memory the job needs up front. The longest human mRNA is around
@@ -215,7 +217,7 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"Ranked {len(ranked)} candidate ASOs; building result tables...")
 
         designed = summarize_design(ranked)
-        for column in (ACCESSIBILITY_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE):
+        for column in (ACCESSIBILITY_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE, RBP_FEATURE):
             if column in ranked.columns:
                 designed[column] = ranked[column].to_numpy()
         safety = tox_details(ranked)
@@ -227,6 +229,7 @@ def execute_tauso_pipeline(config: JobConfig):
                 "off_targets.csv": off_targets,
             },
         )
+        jobs.save_features(config.job_id, ranked)
         jobs.mark(config.job_id, jobs.DONE)
 
         send_processing_completed(config.user_email, config.source_info, jobs.public_url(config.job_id))
