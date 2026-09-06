@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 # processes, so feature computation stays single-process. Raising TAUSO_DESIGN_JOBS above 1 requires
 # a non-daemonic executor.
 DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", "1"))
-# Featurizing tiled candidates is the dominant cost and scales with transcript length, so
-# TAUSO_FIRST_N bounds it. design_asos tiles 5'->3' and takes the first N windows, so this covers
-# only the 5' end of the target (N=50 twenty-mers spans positions 1-69), not a sample across it.
-# Set TAUSO_FIRST_N=0 to tile the whole transcript, which takes hours for a full-length mRNA.
-FIRST_N = int(os.environ.get("TAUSO_FIRST_N", "50")) or None
+# TAUSO_FIRST_N bounds how many tiled candidates are featurised. design_asos tiles 5'->3' and
+# takes the first N windows, so this covers the 5' end of the target rather than sampling across
+# it. Most of a run is fixed cost -- 50 candidates take 87 seconds and 500 take 121 -- so the
+# marginal candidate is cheap and the bound can be generous. Set TAUSO_FIRST_N=0 to tile the whole
+# transcript, which for a 8.8 kb target is around a quarter of an hour.
+FIRST_N = int(os.environ.get("TAUSO_FIRST_N", "500")) or None
 # Report only the top-ranked shortlist so the per-candidate bowtie off-target search stays bounded.
 TOP_N = int(os.environ.get("TAUSO_TOP_N", "100"))
 # Mismatch tolerance for the sequence off-target search (0 = perfect matches only).
