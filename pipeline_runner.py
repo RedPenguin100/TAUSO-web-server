@@ -100,6 +100,22 @@ MFE_FEATURE = "fold_mfe_win25_flank30_step4"
 MAX_TARGET_LENGTH = 200000
 
 
+def exon_layout(locus) -> dict:
+    """Exons as offsets into the pre-mRNA, which is the coordinate a candidate's start is given in.
+
+    The annotation holds genomic coordinates, and the pre-mRNA runs from gene_start to gene_end, so
+    a positive-strand exon is measured from the start and a negative-strand one from the end."""
+    length = len(locus.full_mrna) if locus.full_mrna else 0
+    reverse = str(getattr(locus, "strand", "")).endswith("NEG") or getattr(locus, "strand", 1) == -1
+    exons = []
+    for start, end in getattr(locus, "_exon_indices", []):
+        if reverse:
+            exons.append([locus.gene_end - end, locus.gene_end - start])
+        else:
+            exons.append([start - locus.gene_start, end - locus.gene_start])
+    return {"length": length, "exons": sorted(exons)}
+
+
 def describe_chemistry(chemical_pattern: str, ps_pattern: str) -> str:
     """The chemistry in the terms it is normally written: wing-gap-wing, the modified sugar, and
     how much of the backbone is phosphorothioate. A length on its own is not a chemistry."""
@@ -177,6 +193,20 @@ class JobConfig:
         return f"{'MOE' if 'M' in wings else 'cEt' if 'C' in wings else 'LNA'}/5-methylcytosines/deoxy"
 
 
+def _layout_for(config: JobConfig):
+    """The gene model for this job's target, or None for a sequence the user supplied."""
+    if config.target_data:
+        return None
+    try:
+        from tauso.populate.calculators.cache import AssetCache
+
+        locus = AssetCache(genome="GRCh38").get_full_gene_data().get(config.target_mrna_name)
+        return exon_layout(locus) if locus else None
+    except Exception:
+        logger.warning("Could not read the gene model for %s", config.target_mrna_name)
+        return None
+
+
 def execute_tauso_pipeline(config: JobConfig):
     """Design ASOs for the target end-to-end and email the ranked results, safety detail, and
     per-candidate sequence off-target hits. Runs in an isolated background process."""
@@ -203,6 +233,7 @@ def execute_tauso_pipeline(config: JobConfig):
         # A DB-gene selection leaves target_data empty -> the target is looked up from the genome cache.
         # The oligo length comes from the sugar pattern: several features return NaN unless the
         # pattern is exactly as long as the ASO.
+        layout = None
         ranked, off_targets = design_asos(
             config.target_mrna_name,
             gene_sequence=(config.target_data or None),
@@ -231,6 +262,7 @@ def execute_tauso_pipeline(config: JobConfig):
             },
         )
         jobs.save_features(config.job_id, ranked)
+        jobs.save_layout(config.job_id, layout or _layout_for(config))
         jobs.mark(config.job_id, jobs.DONE)
 
         send_processing_completed(config.user_email, config.source_info, jobs.public_url(config.job_id))

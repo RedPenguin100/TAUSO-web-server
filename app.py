@@ -251,7 +251,11 @@ def _track(data, field, label, title):
                 scale=alt.Scale(range=colours),
                 legend=alt.Legend(
                     title=title, orient="left", direction="horizontal",
-                    gradientLength=90, gradientThickness=8, titleLimit=150,
+                    # Title beside the gradient rather than over it, so the whole legend is one
+                    # line and sits level with the circles it explains.
+                    titleOrient="left", titleAnchor="middle", titleBaseline="middle",
+                    titleLimit=150, titlePadding=8, offset=8,
+                    gradientLength=76, gradientThickness=9,
                     labelFontSize=9, titleFontSize=10, format=".3~g",
                 ),
             ),
@@ -261,14 +265,57 @@ def _track(data, field, label, title):
                 alt.Tooltip(f"{field}:Q", title=title, format=".2f"),
             ],
         )
-        .properties(height=30)
+        .properties(height=26)
     )
 
 
-def _position_chart(designed, score_column):
+def _exon_bands(layout, low, high):
+    """Exons overlapping the drawn range, clipped to it, as a shaded backdrop."""
+    if not layout:
+        return None
+    spans = [
+        {"start": max(a, low), "end": min(b, high)}
+        for a, b in layout.get("exons", [])
+        if b > low and a < high
+    ]
+    if not spans:
+        return None
+    return (
+        alt.Chart(pd.DataFrame(spans))
+        .mark_rect(color="#5A6473", opacity=0.09)
+        .encode(x=alt.X("start:Q", title=None), x2="end:Q")
+    )
+
+
+def _gene_model(layout, low, high):
+    """The target drawn as a gene: a line for the transcript, a block for each exon."""
+    backbone = (
+        alt.Chart(pd.DataFrame([{"start": low, "end": high, "track": "gene"}]))
+        .mark_rule(color="#8792A2", strokeWidth=1.5)
+        .encode(x=alt.X("start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)), x2="end:Q",
+                y=alt.Y("track:N", axis=None))
+    )
+    spans = [
+        {"start": max(a, low), "end": min(b, high), "track": "gene"}
+        for a, b in layout.get("exons", [])
+        if b > low and a < high
+    ]
+    if not spans:
+        return backbone.properties(height=18)
+    blocks = (
+        alt.Chart(pd.DataFrame(spans))
+        .mark_bar(color="#3D4653", height=11)
+        .encode(x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None))
+    )
+    return alt.layer(backbone, blocks).properties(height=18)
+
+
+def _position_chart(designed, score_column, layout=None):
     """Score against transcript position, with the structure and binding of each candidate on their
     own rows beneath, sharing the x scale so a column of marks is one candidate."""
     data = designed.copy()
+    low, high = float(data.target_start.min()), float(data.target_start.max())
+    bands = _exon_bands(layout, low, high)
     scatter = (
         alt.Chart(data)
         .mark_circle(size=70, opacity=0.85, color="#2A78D6")
@@ -286,6 +333,8 @@ def _position_chart(designed, score_column):
         )
         .properties(height=230)
     )
+    if bands is not None:
+        scatter = alt.layer(bands, scatter).properties(height=230)
 
     # Accessibility and folding energy describe the same thing, so they are pushed together into
     # one block and the other tracks keep their spacing.
@@ -299,7 +348,7 @@ def _position_chart(designed, score_column):
         # Each track keeps its own colour scale: these are different features on different
         # scales, and sharing one would flatten the narrower of the two.
         rows.append(
-            alt.vconcat(*structure, spacing=0).resolve_scale(color="independent")
+            alt.vconcat(*structure, spacing=0, bounds="flush").resolve_scale(color="independent")
             if len(structure) > 1
             else structure[0]
         )
@@ -310,7 +359,16 @@ def _position_chart(designed, score_column):
     if RNASE_FEATURE in data:
         rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
 
-    return alt.vconcat(*rows, spacing=26).resolve_scale(x="shared", color="independent")
+    # Flush bounds line the rows up on their plotting areas. Without it each row starts after
+    # whatever sits to its left -- the score axis on one, a legend on the next -- and a column of
+    # marks stops being one candidate.
+    if layout:
+        rows.append(_gene_model(layout, low, high))
+
+    return (
+        alt.vconcat(*rows, spacing=26, bounds="flush")
+        .resolve_scale(x="shared", color="independent")
+    )
 
 
 def _liability_chips(row):
@@ -373,7 +431,15 @@ def results_page(job_id: str):
         "carry the same candidates. Red is the low end of each scale and green the high end, so a "
         "red **binding** mark is the most negative free energy, meaning the tightest duplex."
     )
-    st.altair_chart(_position_chart(designed, score_column), use_container_width=True)
+    layout = jobs.get_layout(job_id)
+    st.altair_chart(_position_chart(designed, score_column, layout), use_container_width=True)
+    if layout:
+        exonic = sum(b - a for a, b in layout["exons"])
+        st.caption(
+            f"{job['target']} is {layout['length']:,} nt with {len(layout['exons'])} exons, "
+            f"{exonic:,} nt exonic ({100 * exonic / layout['length']:.0f}%). Shaded stretches are "
+            f"exonic; the gene track at the foot shows the part of the transcript drawn here."
+        )
 
     starts = designed.head(10)["target_start"].sort_values().tolist()
     if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):

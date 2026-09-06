@@ -22,6 +22,7 @@ RESULT_FILES = ["designed_asos.csv", "safety_detail.csv", "off_targets.csv"]
 # it is there so a ranking can be interrogated afterwards -- why this window, why this candidate --
 # without paying for the run a second time.
 FEATURES_FILE = "features.parquet"
+LAYOUT_FILE = "gene_model.json"
 
 
 def jobs_dir() -> Path:
@@ -127,6 +128,17 @@ def save_features(job_id: str, frame) -> None:
     """Keep the full feature frame for a job."""
     job_dir(job_id).mkdir(parents=True, exist_ok=True)
     frame.to_parquet(job_dir(job_id) / FEATURES_FILE, index=False)
+
+
+def save_layout(job_id: str, layout) -> None:
+    """Keep the target's exon layout so the results can be drawn against the gene it came from."""
+    if layout:
+        (job_dir(job_id) / LAYOUT_FILE).write_text(json.dumps(layout))
+
+
+def get_layout(job_id: str):
+    path = job_dir(job_id) / LAYOUT_FILE
+    return json.loads(path.read_text()) if path.exists() else None
 
 
 def features_path(job_id: str) -> Path:
