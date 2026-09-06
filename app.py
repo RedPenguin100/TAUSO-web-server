@@ -14,7 +14,7 @@ import jobs
 from pipeline_runner import (
     ACCESSIBILITY_FEATURE,
     HYBRIDIZATION_FEATURE,
-    RBP_FEATURE,
+    MFE_FEATURE,
     RNASE_FEATURE,
     describe_chemistry,
     DESIGN_LENGTH_RANGE,
@@ -287,19 +287,24 @@ def _position_chart(designed, score_column):
         .properties(height=230)
     )
 
+    # Accessibility and folding energy describe the same thing, so they are pushed together into
+    # one block and the other tracks keep their spacing.
+    structure = [
+        _track(data, field, label, label)
+        for field, label in ((ACCESSIBILITY_FEATURE, "open site"), (MFE_FEATURE, "MFE"))
+        if field in data
+    ]
     rows = [scatter]
-    if ACCESSIBILITY_FEATURE in data:
-        rows.append(_track(data, ACCESSIBILITY_FEATURE, "open", "open site"))
+    if structure:
+        rows.append(alt.vconcat(*structure, spacing=0) if len(structure) > 1 else structure[0])
     if HYBRIDIZATION_FEATURE in data:
         # Free energy in kcal/mol, as measured: the more negative, the tighter, and red marks the
         # tight end of the scale.
         rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding", "binding dG (kcal/mol)"))
     if RNASE_FEATURE in data:
         rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
-    if RBP_FEATURE in data:
-        rows.append(_track(data, RBP_FEATURE, "hnRNP A3", "hnRNP A3 affinity"))
 
-    return alt.vconcat(*rows, spacing=4).resolve_scale(x="shared", color="independent")
+    return alt.vconcat(*rows, spacing=10).resolve_scale(x="shared", color="independent")
 
 
 def _liability_chips(row):
@@ -387,8 +392,7 @@ def results_page(job_id: str):
             "open": accessibility.round(2) if accessibility is not None else None,
             "binding": binding.round(1) if binding is not None else None,
             "RNase H1": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
-            # Affinities run to a few ten-thousandths, so this one keeps its own format below.
-            "hnRNP A3": merged[RBP_FEATURE] if RBP_FEATURE in merged else None,
+            "MFE": merged[MFE_FEATURE].round(3) if MFE_FEATURE in merged else None,
             "liabilities": merged.apply(_liability_chips, axis=1),
             "1mm": one_mismatch,
             "2mm": two_mismatch,
@@ -398,13 +402,12 @@ def results_page(job_id: str):
         table,
         hide_index=True,
         use_container_width=True,
-        column_config={"hnRNP A3": st.column_config.NumberColumn(format="%.1e")},
     )
     st.caption(
         "**open** is how unpaired the target site is over a 60-nt window; **binding** is the "
         "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
-        "**RNase H1** is how well the local dinucleotide context suits the enzyme that cuts; "
-        "**hnRNP A3** is how strongly that protein binds the same site. "
+        "**MFE** is the folding energy of the site itself, more negative being more structured; **RNase H1** is how well the local dinucleotide context suits the enzyme "
+        "that cuts. "
         "**1mm** and **2mm** count genomic hits to a gene other than the target."
     )
 
