@@ -238,38 +238,33 @@ TRACK_RANGE = ["#cf4c41", "#e9b23c", "#4aa058"]
 
 def _track(data, field, label):
     """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
-    of the values, green at the high end. `label` names the row on the axis."""
-    colours = TRACK_RANGE
+    of the values, green at the high end.
+
+    The row carries its range in its axis label rather than a colour legend. Flush bounds, which is
+    what lines the rows up on the score axis, lays out without regard to legends, so a legend on
+    each row lands on its neighbour."""
+    values = data[field]
+    low, high = values.min(), values.max()
+    name = f"{label}  {low:.3g} to {high:.3g}"
     return (
-        alt.Chart(data.assign(track=label))
+        alt.Chart(data.assign(track=name))
         .mark_circle(size=110)
         .encode(
             x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
-            # The row name is an axis label, not a legend title: axis labels across the rows
-            # share one right edge, so the names line up where the score axis sits. The gradient
-            # is left of that.
             y=alt.Y(
                 "track:N",
                 title=None,
                 axis=alt.Axis(domain=False, ticks=False, labelPadding=8, labelFontSize=10,
-                              labelColor="#515C6B", labelLimit=110),
+                              labelColor="#515C6B", labelLimit=190),
             ),
-            color=alt.Color(
-                f"{field}:Q",
-                scale=alt.Scale(range=colours),
-                legend=alt.Legend(
-                    title=None, orient="left", direction="horizontal", offset=16,
-                    gradientLength=72, gradientThickness=9,
-                    labelFontSize=9, format=".3~g",
-                ),
-            ),
+            color=alt.Color(f"{field}:Q", scale=alt.Scale(range=TRACK_RANGE), legend=None),
             tooltip=[
                 alt.Tooltip("rank:Q"),
                 alt.Tooltip("target_start:Q", title="start"),
-                alt.Tooltip(f"{field}:Q", title=label, format=".2f"),
+                alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
             ],
         )
-        .properties(height=36)
+        .properties(height=26)
     )
 
 
@@ -431,8 +426,9 @@ def results_page(job_id: str):
     st.caption(
         "Each point is one candidate, placed where it binds. Higher is better predicted knockdown "
         "relative to the others here — it ranks candidates, it is not a percent. The tracks beneath "
-        "carry the same candidates. Red is the low end of each scale and green the high end, so a "
-        "red **binding** mark is the most negative free energy, meaning the tightest duplex."
+        "carry the same candidates, each shaded red at the low end of its own range and green at "
+        "the high end — so a red **binding dG** mark is the most negative free energy, the "
+        "tightest duplex. Each row gives its range beside its name."
     )
     layout = jobs.get_layout(job_id)
     st.altair_chart(_position_chart(designed, score_column, layout), use_container_width=True)
