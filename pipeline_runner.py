@@ -86,7 +86,8 @@ DEFAULT_CELL_DENSITY = 20000
 # Two features carried into the results so a reader can see why a site scored as it did.
 # Accessibility is how unpaired the target site is over a 60-nt window; the hybridization term is
 # the DNA:RNA duplex free energy, which is computed for every chemistry rather than only for MOE.
-ACCESSIBILITY_FEATURE = "fold_access_60flank_20access_4-6-8seed_sizes"
+# A 20-nt window opened over the target site, folded with 60 nt of flank on each side.
+ACCESSIBILITY_FEATURE = "access_f60_sinf_u20_a5"
 HYBRIDIZATION_FEATURE = "hybr_dna_rna_dg"
 RNASE_FEATURE = "rnase_score_dinucleotide_R4a_dinuc_dynamic"
 # Folding energy of the site itself. The narrow window is the one that varies candidate to

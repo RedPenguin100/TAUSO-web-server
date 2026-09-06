@@ -4,16 +4,14 @@ set -e
 
 mkdir -p "$TAUSO_DATA_DIR"
 
-# 1. raccess cannot be legally redistributed, so it is built from source into the persistent
-# volume. The command compares the pinned commit and the installed binary and no-ops when both
-# already match, so it is cheap to run on every boot.
-tauso setup-raccess
+# 1. The trained booster is not shipped in the package; it is fetched into the persistent volume.
+# A failure here is reported and survived rather than being fatal: without a model a design job
+# fails and mails the submitter, which is a great deal better than the site never starting.
+if ! tauso setup-model; then
+    echo "WARNING: no scoring model. The site will run and designs will fail until one is in place."
+fi
 
-# 2. The trained booster is not shipped in the package; it is fetched from Zenodo into the
-# persistent volume. The command verifies the md5 and skips the download when it is already there.
-tauso setup-model
-
-# 3. Full TAUSO Database & Weights Initialization (Persistent Volume Check)
+# 2. Full TAUSO Database & Weights Initialization (Persistent Volume Check)
 if [ ! -f "$TAUSO_DATA_DIR/.tauso_initialized_v2" ]; then
     echo "Initial data or weights not found. Running full TAUSO setup pipeline..."
 
@@ -33,7 +31,7 @@ else
     echo "TAUSO databases and weights found. Skipping initialization."
 fi
 
-# 4. Setup the Streamlit App Cache
+# 3. Setup the Streamlit App Cache
 if [ ! -f "$TAUSO_DATA_DIR/available_genes.json" ]; then
     echo "Gene cache missing. Running cache_genes.py..."
     micromamba run -n base python /app/cache_genes.py
@@ -41,7 +39,7 @@ else
     echo "Gene cache found, skipping pre-computation."
 fi
 
-# 5. Start the Webserver
+# 4. Start the Webserver
 PORT="${PORT:-8501}"
 echo "Starting Streamlit UI on port $PORT..."
 exec streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
