@@ -319,7 +319,7 @@ def _position_chart(designed, score_column, layout=None):
         alt.Chart(data)
         .mark_circle(size=70, opacity=0.85, color="#2A78D6")
         .encode(
-            x=alt.X("target_start:Q", title=None, scale=alt.Scale(zero=False, nice=False)),
+            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
             # The scores of a shortlist sit close together, so the axis follows them rather than
             # reaching down to zero and flattening the differences.
             y=alt.Y(f"{score_column}:Q", title="score", scale=alt.Scale(zero=False, nice=True)),
@@ -335,37 +335,34 @@ def _position_chart(designed, score_column, layout=None):
     if bands is not None:
         scatter = alt.layer(bands, scatter).properties(height=230)
 
-    # Accessibility and folding energy describe the same thing, so they are pushed together into
-    # one block and the other tracks keep their spacing.
-    structure = [
-        _track(data, field, label)
-        for field, label in ((ACCESSIBILITY_FEATURE, "open site"), (MFE_FEATURE, "MFE"))
-        if field in data
-    ]
+    # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
+    # the ones that follow, so the grouping has to come from the order, not from nesting.
     rows = [scatter]
     if layout:
         rows.append(_gene_model(layout, low, high))
-    if structure:
-        # Each track keeps its own colour scale: these are different features on different
-        # scales, and sharing one would flatten the narrower of the two.
-        rows.append(
-            alt.vconcat(*structure, spacing=0, bounds="flush").resolve_scale(color="independent")
-            if len(structure) > 1
-            else structure[0]
-        )
-    if HYBRIDIZATION_FEATURE in data:
-        # Free energy in kcal/mol, as measured: the more negative, the tighter, and red marks the
-        # tight end of the scale.
-        rows.append(_track(data, HYBRIDIZATION_FEATURE, "binding dG"))
-    if RNASE_FEATURE in data:
-        rows.append(_track(data, RNASE_FEATURE, "RNase H1"))
+    for field, label in (
+        (ACCESSIBILITY_FEATURE, "open site"),
+        (MFE_FEATURE, "MFE"),
+        (HYBRIDIZATION_FEATURE, "binding dG"),
+        (RNASE_FEATURE, "RNase H1"),
+    ):
+        if field in data:
+            rows.append(_track(data, field, label))
 
-    # Flush bounds line the rows up on their plotting areas. Without it each row starts after
-    # whatever sits to its left -- the score axis on one, a legend on the next -- and a column of
-    # marks stops being one candidate.
+    # Flush bounds lays out ignoring axes, so an axis on any row but the last would be drawn over
+    # the row beneath it. One axis at the foot labels the whole stack.
+    rows[-1] = rows[-1].encode(
+        x=alt.X(
+            "target_start:Q",
+            title="position in the transcript (nt)",
+            scale=alt.Scale(zero=False, nice=False),
+        )
+    )
+
     return (
-        alt.vconcat(*rows, spacing=22, bounds="flush")
+        alt.vconcat(*rows, spacing=8, bounds="flush")
         .resolve_scale(x="shared", color="independent")
+        .configure_view(strokeWidth=0)
     )
 
 
