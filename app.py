@@ -261,7 +261,7 @@ def _track(data, field, label, title):
                 alt.Tooltip(f"{field}:Q", title=title, format=".2f"),
             ],
         )
-        .properties(height=44)
+        .properties(height=30)
     )
 
 
@@ -296,7 +296,13 @@ def _position_chart(designed, score_column):
     ]
     rows = [scatter]
     if structure:
-        rows.append(alt.vconcat(*structure, spacing=0) if len(structure) > 1 else structure[0])
+        # Each track keeps its own colour scale: these are different features on different
+        # scales, and sharing one would flatten the narrower of the two.
+        rows.append(
+            alt.vconcat(*structure, spacing=0).resolve_scale(color="independent")
+            if len(structure) > 1
+            else structure[0]
+        )
     if HYBRIDIZATION_FEATURE in data:
         # Free energy in kcal/mol, as measured: the more negative, the tighter, and red marks the
         # tight end of the scale.
@@ -304,7 +310,7 @@ def _position_chart(designed, score_column):
     if RNASE_FEATURE in data:
         rows.append(_track(data, RNASE_FEATURE, "RNase H1", "RNase H1 motif fit"))
 
-    return alt.vconcat(*rows, spacing=10).resolve_scale(x="shared", color="independent")
+    return alt.vconcat(*rows, spacing=26).resolve_scale(x="shared", color="independent")
 
 
 def _liability_chips(row):
