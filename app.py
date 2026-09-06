@@ -236,13 +236,31 @@ def conditions_section():
 TRACK_RANGE = ["#cf4c41", "#e9b23c", "#4aa058"]
 
 
-def _track(data, field, label):
+def _crosshair():
+    """A shared hover: pointing at any row marks that position on all of them."""
+    return alt.selection_point(
+        name="hovered", on="pointerover", nearest=True, empty=False,
+        fields=["target_start"], clear="pointerout",
+    )
+
+
+def _rule(data, hover):
+    """The line the crosshair draws, spanning whichever row it is layered onto."""
+    return (
+        alt.Chart(data)
+        .mark_rule(color="#3D4653", strokeWidth=1, strokeDash=[3, 2])
+        .encode(x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)))
+        .transform_filter(hover)
+    )
+
+
+def _track(data, field, label, hover=None):
     """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
     of the values, green at the high end.
 
     Name and colour key sit to the right of the circles. The plot areas are what line the rows up
     with the score above, so anything to the left of them would push the row out of line."""
-    return (
+    chart = (
         alt.Chart(data.assign(track=label))
         .mark_circle(size=110)
         .encode(
@@ -270,6 +288,7 @@ def _track(data, field, label):
         )
         .properties(height=26, width=468)
     )
+    return alt.layer(chart, _rule(data, hover)) if hover is not None else chart
 
 
 def _exon_bands(layout, low, high):
@@ -291,15 +310,22 @@ def _exon_bands(layout, low, high):
 
 
 def _gene_model(layout, low, high):
-    """The target drawn as a gene: a line for the transcript, a block for each exon."""
+    """The target drawn as a gene: a line for the transcript, a block for each exon. The two are
+    colour-encoded rather than hard-coded so the reader gets a key for which is which."""
+    scale = alt.Scale(domain=["exon", "intron"], range=["#3D4653", "#8792A2"])
+    legend = alt.Legend(title=None, orient="right", offset=6, symbolSize=90, labelFontSize=10)
+
     backbone = (
-        alt.Chart(pd.DataFrame([{"start": low, "end": high, "track": "gene"}]))
-        .mark_rule(color="#8792A2", strokeWidth=1.5)
-        .encode(x=alt.X("start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)), x2="end:Q",
-                y=alt.Y("track:N", axis=None))
+        alt.Chart(pd.DataFrame([{"start": low, "end": high, "track": "gene", "part": "intron"}]))
+        .mark_rule(strokeWidth=2)
+        .encode(
+            x=alt.X("start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)), x2="end:Q",
+            y=alt.Y("track:N", axis=None),
+            color=alt.Color("part:N", scale=scale, legend=legend),
+        )
     )
     spans = [
-        {"start": max(a, low), "end": min(b, high), "track": "gene"}
+        {"start": max(a, low), "end": min(b, high), "track": "gene", "part": "exon"}
         for a, b in layout.get("exons", [])
         if b > low and a < high
     ]
@@ -307,8 +333,11 @@ def _gene_model(layout, low, high):
         return backbone.properties(height=12, width=468)
     blocks = (
         alt.Chart(pd.DataFrame(spans))
-        .mark_bar(color="#3D4653", height=7)
-        .encode(x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None))
+        .mark_bar(height=7)
+        .encode(
+            x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None),
+            color=alt.Color("part:N", scale=scale, legend=legend),
+        )
     )
     return alt.layer(backbone, blocks).properties(height=12, width=468)
 
@@ -318,6 +347,7 @@ def _position_chart(designed, score_column, layout=None):
     own rows beneath, sharing the x scale so a column of marks is one candidate."""
     data = designed.copy()
     low, high = float(data.target_start.min()), float(data.target_start.max())
+    hover = _crosshair()
     bands = _exon_bands(layout, low, high)
     scatter = (
         alt.Chart(data)
@@ -336,8 +366,10 @@ def _position_chart(designed, score_column, layout=None):
         )
         .properties(height=230, width=468)
     )
+    scatter = alt.layer(scatter, _rule(data, hover))
     if bands is not None:
-        scatter = alt.layer(bands, scatter).properties(height=230, width=468)
+        scatter = alt.layer(bands, scatter)
+    scatter = scatter.properties(height=230, width=468)
 
     # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
     # the ones that follow, so the grouping has to come from the order, not from nesting.
@@ -376,11 +408,14 @@ def _position_chart(designed, score_column, layout=None):
         (RNASE_FEATURE, "RNase H1"),
     ):
         if field in data:
-            rows.append(_track(data, field, label))
+            rows.append(_track(data, field, label, hover))
 
 
     return (
         alt.vconcat(*rows, spacing=2, bounds="flush")
+        # Declared for the whole stack: a selection made inside one row is not visible to its
+        # siblings, and the point of this one is that every row responds to it.
+        .add_params(hover)
         .resolve_scale(x="shared", color="independent")
         .configure_view(strokeWidth=0)
         .properties(padding={"left": 0, "top": 4, "right": 4, "bottom": 4})
