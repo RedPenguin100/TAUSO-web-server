@@ -254,7 +254,7 @@ def _track(data, field, label, title):
                     # Title beside the gradient rather than over it, so the whole legend is one
                     # line and sits level with the circles it explains.
                     titleOrient="left", titleAnchor="middle", titleBaseline="middle",
-                    titleLimit=150, titlePadding=8, offset=8,
+                    titleLimit=150, titlePadding=8, offset=22,
                     gradientLength=76, gradientThickness=9,
                     labelFontSize=9, titleFontSize=10, format=".3~g",
                 ),
@@ -265,7 +265,7 @@ def _track(data, field, label, title):
                 alt.Tooltip(f"{field}:Q", title=title, format=".2f"),
             ],
         )
-        .properties(height=26)
+        .properties(height=36)
     )
 
 
@@ -344,6 +344,8 @@ def _position_chart(designed, score_column, layout=None):
         if field in data
     ]
     rows = [scatter]
+    if layout:
+        rows.append(_gene_model(layout, low, high))
     if structure:
         # Each track keeps its own colour scale: these are different features on different
         # scales, and sharing one would flatten the narrower of the two.
@@ -362,11 +364,8 @@ def _position_chart(designed, score_column, layout=None):
     # Flush bounds line the rows up on their plotting areas. Without it each row starts after
     # whatever sits to its left -- the score axis on one, a legend on the next -- and a column of
     # marks stops being one candidate.
-    if layout:
-        rows.append(_gene_model(layout, low, high))
-
     return (
-        alt.vconcat(*rows, spacing=26, bounds="flush")
+        alt.vconcat(*rows, spacing=22, bounds="flush")
         .resolve_scale(x="shared", color="independent")
     )
 
