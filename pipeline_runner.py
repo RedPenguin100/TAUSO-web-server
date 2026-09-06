@@ -7,7 +7,13 @@ from typing import Optional
 
 import jobs
 from email_service import send_processing_completed, send_processing_failed, send_processing_started
-from tauso.aso_generation import default_config, design_asos, summarize_design, tox_details
+from tauso.aso_generation import (
+    _sequence_offtarget_table,
+    default_config,
+    design_asos,
+    summarize_design,
+    tox_details,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -22,7 +28,10 @@ DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", "1"))
 # marginal candidate is cheap and the bound can be generous. Set TAUSO_FIRST_N=0 to tile the whole
 # transcript, which for a 8.8 kb target is around a quarter of an hour.
 FIRST_N = int(os.environ.get("TAUSO_FIRST_N", "500")) or None
-# Report only the top-ranked shortlist so the per-candidate bowtie off-target search stays bounded.
+# How many candidates make the shortlist: the table, and the per-candidate bowtie off-target
+# search, which is what this bounds. Every candidate scored is still charted and downloadable --
+# a plot of the winners alone reads as a landscape while hiding exactly the stretches a reader
+# most needs to see are bad.
 TOP_N = int(os.environ.get("TAUSO_TOP_N", "100"))
 # Mismatch tolerance for the sequence off-target search (0 = perfect matches only).
 OFFTARGET_MAX_DISTANCE = int(os.environ.get("TAUSO_OFFTARGET_MAX_DISTANCE", "2"))
@@ -236,25 +245,35 @@ def execute_tauso_pipeline(config: JobConfig):
         # The oligo length comes from the sugar pattern: several features return NaN unless the
         # pattern is exactly as long as the ASO.
         layout = None
-        ranked, off_targets = design_asos(
+        # Scored without a cutoff, so the whole scan is available to chart; the shortlist below
+        # is what the off-target search and the table are bounded to.
+        ranked = design_asos(
             config.target_mrna_name,
             gene_sequence=(config.target_data or None),
             cell_line=config.cell_line,
             aso_sizes=[len(config.chemical_pattern)],
             config=design_config,
             first_n=FIRST_N,
-            top_n=TOP_N,
+            top_n=None,
             n_jobs=DESIGN_JOBS,
-            off_targets=True,
-            off_target_max_distance=OFFTARGET_MAX_DISTANCE,
+            off_targets=False,
         )
-        logger.info(f"Ranked {len(ranked)} candidate ASOs; building result tables...")
+        logger.info(f"Scored {len(ranked)} candidate ASOs; building result tables...")
+
+        shortlist = ranked.head(TOP_N)
+        off_targets = _sequence_offtarget_table(
+            shortlist,
+            genome="GRCm39" if design_config.organism_name == "mouse" else "GRCh38",
+            max_distance=OFFTARGET_MAX_DISTANCE,
+            exclude_genes=None,
+        )
+        logger.info(f"{len(off_targets)} off-target hits across the top {len(shortlist)}.")
 
         designed = summarize_design(ranked)
         for column in (ACCESSIBILITY_FEATURE, MFE_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE):
             if column in ranked.columns:
                 designed[column] = ranked[column].to_numpy()
-        safety = tox_details(ranked)
+        safety = tox_details(shortlist)
         jobs.save_results(
             config.job_id,
             {

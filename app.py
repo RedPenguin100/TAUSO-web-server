@@ -434,6 +434,8 @@ def results_page(job_id: str):
     )
     st.caption(chemistry)
 
+    shortlist = designed[designed["aso_sequence"].isin(safety["aso_sequence"])]
+
     top = st.columns(4)
     top[0].metric("Candidates", len(designed))
     top[1].metric("Length", f"{len(parameters.get('chemical_pattern', ''))} nt")
@@ -458,15 +460,19 @@ def results_page(job_id: str):
             f"exonic; the gene track at the foot shows the part of the transcript drawn here."
         )
 
-    starts = designed.head(10)["target_start"].sort_values().tolist()
+    starts = shortlist.head(10)["target_start"].sort_values().tolist()
     if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):
         st.warning(
             f"The top 10 all start between {starts[0]} and {starts[-1]}. Tiling moves one nucleotide "
             "at a time, so these overlap heavily — they are one site rather than ten choices."
         )
 
-    st.subheader("Candidates")
-    merged = designed.merge(safety, on="aso_sequence", how="left")
+    st.subheader(f"Top {len(shortlist)} candidates")
+    st.caption(
+        f"The chart above carries all {len(designed):,} scored candidates; this is the shortlist, "
+        "which is also what the off-target search covers."
+    )
+    merged = shortlist.merge(safety, on="aso_sequence", how="left")
     hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
     accessibility = merged.get(ACCESSIBILITY_FEATURE)
     binding = merged.get(HYBRIDIZATION_FEATURE)
