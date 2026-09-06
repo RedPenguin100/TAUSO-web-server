@@ -258,8 +258,8 @@ def _track(data, field, label):
                 scale=alt.Scale(range=TRACK_RANGE),
                 legend=alt.Legend(
                     title=None, orient="none", direction="horizontal",
-                    legendX=545, legendY=2,
-                    gradientLength=70, gradientThickness=8, labelFontSize=8, format=".3~g",
+                    legendX=546, legendY=2,
+                    gradientLength=62, gradientThickness=7, tickCount=2, labelFontSize=8, format=".3~g",
                 ),
             ),
             tooltip=[
@@ -268,7 +268,7 @@ def _track(data, field, label):
                 alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
             ],
         )
-        .properties(height=26, width=450)
+        .properties(height=26, width=468)
     )
 
 
@@ -304,13 +304,13 @@ def _gene_model(layout, low, high):
         if b > low and a < high
     ]
     if not spans:
-        return backbone.properties(height=18, width=450)
+        return backbone.properties(height=12, width=468)
     blocks = (
         alt.Chart(pd.DataFrame(spans))
-        .mark_bar(color="#3D4653", height=11)
+        .mark_bar(color="#3D4653", height=7)
         .encode(x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None))
     )
-    return alt.layer(backbone, blocks).properties(height=18, width=450)
+    return alt.layer(backbone, blocks).properties(height=12, width=468)
 
 
 def _position_chart(designed, score_column, layout=None):
@@ -334,10 +334,10 @@ def _position_chart(designed, score_column, layout=None):
                 alt.Tooltip(f"{score_column}:Q", title="score", format=".2f"),
             ],
         )
-        .properties(height=230, width=450)
+        .properties(height=230, width=468)
     )
     if bands is not None:
-        scatter = alt.layer(bands, scatter).properties(height=230, width=450)
+        scatter = alt.layer(bands, scatter).properties(height=230, width=468)
 
     # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
     # the ones that follow, so the grouping has to come from the order, not from nesting.
@@ -360,14 +360,14 @@ def _position_chart(designed, score_column, layout=None):
                               labelFontSize=10, titleFontSize=11),
             )
         )
-        .properties(height=1, width=450)
+        .properties(height=1, width=468)
     )
     # Flush bounds gives an axis no height of its own, so it hangs into whatever follows. An empty
     # row of the axis's height gives it somewhere to hang.
     rows.append(
         alt.Chart(data.head(1)).mark_point(opacity=0).encode(
             x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False))
-        ).properties(height=26, width=450)
+        ).properties(height=26, width=468)
     )
     for field, label in (
         (ACCESSIBILITY_FEATURE, "open site"),
