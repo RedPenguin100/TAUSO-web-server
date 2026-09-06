@@ -257,7 +257,8 @@ def _track(data, field, label):
                 f"{field}:Q",
                 scale=alt.Scale(range=TRACK_RANGE),
                 legend=alt.Legend(
-                    title=None, orient="right", direction="horizontal", offset=6,
+                    title=None, orient="none", direction="horizontal",
+                    legendX=545, legendY=2,
                     gradientLength=70, gradientThickness=8, labelFontSize=8, format=".3~g",
                 ),
             ),
@@ -267,7 +268,7 @@ def _track(data, field, label):
                 alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
             ],
         )
-        .properties(height=34, width=450)
+        .properties(height=26, width=450)
     )
 
 
@@ -343,6 +344,31 @@ def _position_chart(designed, score_column, layout=None):
     rows = [scatter]
     if layout:
         rows.append(_gene_model(layout, low, high))
+    # A row of its own carrying nothing but the scale, so it is read straight after the transcript
+    # it measures and before the rows that use it. An axis on a row with marks is drawn over the
+    # row beneath, because flush bounds lays out without regard to axes.
+    rows.append(
+        alt.Chart(data)
+        .mark_point(opacity=0)
+        .encode(
+            x=alt.X(
+                "target_start:Q",
+                title="position in the transcript (nt)",
+                scale=alt.Scale(zero=False, nice=False),
+                # Tight to the gene track above it, and to the tracks below.
+                axis=alt.Axis(grid=False, orient="bottom", labelPadding=1, titlePadding=1,
+                              labelFontSize=10, titleFontSize=11),
+            )
+        )
+        .properties(height=1, width=450)
+    )
+    # Flush bounds gives an axis no height of its own, so it hangs into whatever follows. An empty
+    # row of the axis's height gives it somewhere to hang.
+    rows.append(
+        alt.Chart(data.head(1)).mark_point(opacity=0).encode(
+            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False))
+        ).properties(height=26, width=450)
+    )
     for field, label in (
         (ACCESSIBILITY_FEATURE, "open site"),
         (MFE_FEATURE, "MFE"),
@@ -352,19 +378,9 @@ def _position_chart(designed, score_column, layout=None):
         if field in data:
             rows.append(_track(data, field, label))
 
-    # Flush bounds lays out ignoring axes, so an axis on any row but the last would be drawn over
-    # the row beneath it. One axis at the foot labels the whole stack.
-    rows[-1] = rows[-1].encode(
-        x=alt.X(
-            "target_start:Q",
-            title="position in the transcript (nt)",
-            scale=alt.Scale(zero=False, nice=False),
-            axis=alt.Axis(grid=False),
-        )
-    )
 
     return (
-        alt.vconcat(*rows, spacing=8, bounds="flush")
+        alt.vconcat(*rows, spacing=2, bounds="flush")
         .resolve_scale(x="shared", color="independent")
         .configure_view(strokeWidth=0)
         .properties(padding={"left": 0, "top": 4, "right": 4, "bottom": 4})
