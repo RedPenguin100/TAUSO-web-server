@@ -264,7 +264,7 @@ def _track(data, field, label):
                 alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
             ],
         )
-        .properties(height=26)
+        .properties(height=26, width=640)
     )
 
 
@@ -300,13 +300,13 @@ def _gene_model(layout, low, high):
         if b > low and a < high
     ]
     if not spans:
-        return backbone.properties(height=18)
+        return backbone.properties(height=18, width=640)
     blocks = (
         alt.Chart(pd.DataFrame(spans))
         .mark_bar(color="#3D4653", height=11)
         .encode(x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None))
     )
-    return alt.layer(backbone, blocks).properties(height=18)
+    return alt.layer(backbone, blocks).properties(height=18, width=640)
 
 
 def _position_chart(designed, score_column, layout=None):
@@ -330,10 +330,10 @@ def _position_chart(designed, score_column, layout=None):
                 alt.Tooltip(f"{score_column}:Q", title="score", format=".2f"),
             ],
         )
-        .properties(height=230)
+        .properties(height=230, width=640)
     )
     if bands is not None:
-        scatter = alt.layer(bands, scatter).properties(height=230)
+        scatter = alt.layer(bands, scatter).properties(height=230, width=640)
 
     # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
     # the ones that follow, so the grouping has to come from the order, not from nesting.
@@ -356,6 +356,7 @@ def _position_chart(designed, score_column, layout=None):
             "target_start:Q",
             title="position in the transcript (nt)",
             scale=alt.Scale(zero=False, nice=False),
+            axis=alt.Axis(grid=False),
         )
     )
 
@@ -363,6 +364,7 @@ def _position_chart(designed, score_column, layout=None):
         alt.vconcat(*rows, spacing=8, bounds="flush")
         .resolve_scale(x="shared", color="independent")
         .configure_view(strokeWidth=0)
+        .properties(padding={"left": 0, "top": 4, "right": 4, "bottom": 4})
     )
 
 
