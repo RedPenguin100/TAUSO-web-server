@@ -4,8 +4,10 @@ import json
 import os
 from pathlib import Path
 
-import altair as alt
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
 from Bio import SeqIO
@@ -13,6 +15,7 @@ from Bio import SeqIO
 import jobs
 from pipeline_runner import (
     ACCESSIBILITY_FEATURE,
+    GC_FEATURE,
     HYBRIDIZATION_FEATURE,
     MFE_FEATURE,
     RNASE_FEATURE,
@@ -31,7 +34,11 @@ from pipeline_runner import (
     trigger_background_job,
 )
 
-st.set_page_config(page_title="TAUSO | ASO design", layout="centered")
+# The design form reads better in a column; the results page is a wide chart and wants the room.
+st.set_page_config(
+    page_title="TAUSO | ASO design",
+    layout="wide" if st.query_params.get("job") else "centered",
+)
 
 _pattern_editor = components.declare_component(
     "pattern_editor", path=str(Path(__file__).parent / "components" / "pattern_editor")
@@ -233,192 +240,233 @@ def conditions_section():
 
 
 # One scale for every track: red at the low end of the values, green at the high end.
-TRACK_RANGE = ["#cf4c41", "#e9b23c", "#4aa058"]
+# How much of the transcript the chart opens on, and the width at which its marks are drawn at
+# full weight. A whole scan is tens of thousands of candidates across 468 px, which is a smear
+# rather than a landscape.
+WINDOW_NT = 2000
 
+# The name every row of the chart refers to its candidates by.
+CANDIDATES = "candidates"
 
-def _crosshair():
-    """A shared hover: pointing at any row marks that position on all of them."""
-    return alt.selection_point(
-        name="hovered", on="pointerover", nearest=True, empty=False,
-        fields=["target_start"], clear="pointerout",
-    )
+TRACK_SCALE = [(0.0, "#cf4c41"), (0.5, "#e9b23c"), (1.0, "#4aa058")]
+GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2"}
 
-
-def _rule(data, hover):
-    """The line the crosshair draws, spanning whichever row it is layered onto."""
-    return (
-        alt.Chart(data)
-        .mark_rule(color="#3D4653", strokeWidth=1, strokeDash=[3, 2])
-        .encode(x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)))
-        .transform_filter(hover)
-    )
-
-
-def _track(data, field, label, hover=None):
-    """One row of circles under the plot, a candidate each, coloured by `field`: red at the low end
-    of the values, green at the high end.
-
-    Name and colour key sit to the right of the circles. The plot areas are what line the rows up
-    with the score above, so anything to the left of them would push the row out of line."""
-    chart = (
-        alt.Chart(data.assign(track=label))
-        .mark_circle(size=110)
-        .encode(
-            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
-            y=alt.Y(
-                "track:N",
-                title=None,
-                axis=alt.Axis(orient="right", domain=False, ticks=False, labelPadding=8,
-                              labelFontSize=11, labelColor="#3D4653", labelLimit=120),
-            ),
-            color=alt.Color(
-                f"{field}:Q",
-                scale=alt.Scale(range=TRACK_RANGE),
-                legend=alt.Legend(
-                    title=None, orient="none", direction="horizontal",
-                    legendX=546, legendY=2,
-                    gradientLength=62, gradientThickness=7, tickCount=2, labelFontSize=8, format=".3~g",
-                ),
-            ),
-            tooltip=[
-                alt.Tooltip("rank:Q"),
-                alt.Tooltip("target_start:Q", title="start"),
-                alt.Tooltip(f"{field}:Q", title=label, format=".4~g"),
-            ],
-        )
-        .properties(height=26, width=468)
-    )
-    return alt.layer(chart, _rule(data, hover)) if hover is not None else chart
-
-
-def _exon_bands(layout, low, high):
-    """Exons overlapping the drawn range, clipped to it, as a shaded backdrop."""
-    if not layout:
-        return None
-    spans = [
-        {"start": max(a, low), "end": min(b, high)}
-        for a, b in layout.get("exons", [])
-        if b > low and a < high
-    ]
-    if not spans:
-        return None
-    return (
-        alt.Chart(pd.DataFrame(spans))
-        .mark_rect(color="#5A6473", opacity=0.09)
-        .encode(x=alt.X("start:Q", title=None), x2="end:Q")
-    )
-
-
-def _gene_model(layout, low, high):
-    """The target drawn as a gene: a line for the transcript, a block for each exon. The two are
-    colour-encoded rather than hard-coded so the reader gets a key for which is which."""
-    scale = alt.Scale(domain=["exon", "intron"], range=["#3D4653", "#8792A2"])
-    legend = alt.Legend(title=None, orient="right", offset=6, symbolSize=90, labelFontSize=10)
-
-    backbone = (
-        alt.Chart(pd.DataFrame([{"start": low, "end": high, "track": "gene", "part": "intron"}]))
-        .mark_rule(strokeWidth=2)
-        .encode(
-            x=alt.X("start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)), x2="end:Q",
-            y=alt.Y("track:N", axis=None),
-            color=alt.Color("part:N", scale=scale, legend=legend),
-        )
-    )
-    spans = [
-        {"start": max(a, low), "end": min(b, high), "track": "gene", "part": "exon"}
-        for a, b in layout.get("exons", [])
-        if b > low and a < high
-    ]
-    if not spans:
-        return backbone.properties(height=10, width=468)
-    blocks = (
-        alt.Chart(pd.DataFrame(spans))
-        .mark_bar(height=7)
-        .encode(
-            x=alt.X("start:Q", axis=None), x2="end:Q", y=alt.Y("track:N", axis=None),
-            color=alt.Color("part:N", scale=scale, legend=legend),
-        )
-    )
-    return alt.layer(backbone, blocks).properties(height=10, width=468)
-
-
-def _position_chart(designed, score_column, layout=None):
+def _position_figure(designed, score_column, layout=None):
     """Score against transcript position, with the structure and binding of each candidate on their
-    own rows beneath, sharing the x scale so a column of marks is one candidate."""
-    data = designed.copy()
-    low, high = float(data.target_start.min()), float(data.target_start.max())
-    hover = _crosshair()
-    bands = _exon_bands(layout, low, high)
-    scatter = (
-        alt.Chart(data)
-        .mark_circle(size=70, opacity=0.85, color="#2A78D6")
-        .encode(
-            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False)),
-            # The scores of a shortlist sit close together, so the axis follows them rather than
-            # reaching down to zero and flattening the differences.
-            y=alt.Y(f"{score_column}:Q", title="score", scale=alt.Scale(zero=False, nice=True)),
-            tooltip=[
-                alt.Tooltip("rank:Q"),
-                alt.Tooltip("aso_sequence:N", title="sequence"),
-                alt.Tooltip("target_start:Q", title="start"),
-                alt.Tooltip(f"{score_column}:Q", title="score", format=".2f"),
-            ],
-        )
-        .properties(height=230, width=468)
-    )
-    scatter = alt.layer(scatter, _rule(data, hover))
-    if bands is not None:
-        scatter = alt.layer(bands, scatter)
-    scatter = scatter.properties(height=230, width=468)
+    own rows beneath, sharing the x axis so a column of marks is one candidate.
 
-    # One flat list of rows. A nested concat inside a flush-bounds concat lays its rows on top of
-    # the ones that follow, so the grouping has to come from the order, not from nesting.
-    rows = [scatter]
-    if layout:
-        rows.append(_gene_model(layout, low, high))
-    # A row of its own carrying nothing but the scale, so it is read straight after the transcript
-    # it measures and before the rows that use it. An axis on a row with marks is drawn over the
-    # row beneath, because flush bounds lays out without regard to axes.
-    rows.append(
-        alt.Chart(data)
-        .mark_point(opacity=0)
-        .encode(
-            x=alt.X(
-                "target_start:Q",
-                title="position in the transcript (nt)",
-                scale=alt.Scale(zero=False, nice=False),
-                # Tight to the gene track above it, and to the tracks below.
-                axis=alt.Axis(grid=False, orient="bottom", labelPadding=12, titlePadding=2,
-                              labelFontSize=10, titleFontSize=11),
-            )
-        )
-        .properties(height=1, width=468)
-    )
-    # Flush bounds gives an axis no height of its own, so it hangs into whatever follows. An empty
-    # row of the axis's height gives it somewhere to hang.
-    rows.append(
-        alt.Chart(data.head(1)).mark_point(opacity=0).encode(
-            x=alt.X("target_start:Q", axis=None, scale=alt.Scale(zero=False, nice=False))
-        ).properties(height=40, width=468)
-    )
-    for field, label in (
+    The scores are a WebGL trace and each feature row is a single raster, so panning and zooming
+    move work the browser has already done rather than redrawing thousands of shapes."""
+    tracks = [
         (ACCESSIBILITY_FEATURE, "open site"),
         (MFE_FEATURE, "MFE"),
         (HYBRIDIZATION_FEATURE, "binding dG"),
         (RNASE_FEATURE, "RNase H1"),
-    ):
-        if field in data:
-            rows.append(_track(data, field, label, hover))
+        (GC_FEATURE, "GC"),
+    ]
+    tracks = [(column, label) for column, label in tracks if column in designed.columns]
+    rows_at = []
+
+    data = designed.sort_values("target_start")
+    x = data["target_start"].to_numpy()
+    scores = data[score_column].to_numpy(dtype=float)
+    low, high = float(x.min()), float(x.max())
+
+    # Score, then the transcript, then a row a feature, then the whole scan again small enough to
+    # navigate by.
+    heights = [0.60, 0.05] + [0.345 / len(tracks)] * len(tracks) + [0.005]
+    overview_row = 3 + len(tracks)
+    figure = make_subplots(rows=overview_row, cols=1, shared_xaxes=True,
+                           vertical_spacing=0.006, row_heights=heights)
+
+    # A full window is thousands of candidates over the panel's width, where solid marks read as a
+    # block of colour; a short scan is a few dozen, where they read as scattered specks.
+    crowding = min(1.0, float((x < x.min() + WINDOW_NT).sum()) / WINDOW_NT)
+    figure.add_trace(
+        go.Scattergl(
+            x=x, y=scores, mode="markers",
+            marker=dict(size=6 - 2 * crowding, color="#2A78D6", opacity=0.85 - 0.45 * crowding),
+            name="score", showlegend=False,
+            hovertemplate="%{x:,.0f} nt<br>score %{y:.2f}<extra></extra>",
+        ),
+        row=1, col=1,
+    )
+
+    if layout:
+        for begin, finish in layout.get("exons", []):
+            if finish > low and begin < high:
+                figure.add_vrect(x0=max(begin, low), x1=min(finish, high), row=1, col=1,
+                                 fillcolor="#5A6473", opacity=0.09, line_width=0, layer="below")
+        figure.add_shape(type="line", x0=low, x1=high, y0=0.5, y1=0.5, row=2, col=1,
+                         layer="below", line=dict(color=GENE_COLOURS["intron"], width=2))
+        for begin, finish in layout.get("exons", []):
+            if finish > low and begin < high:
+                figure.add_shape(type="rect", x0=max(begin, low), x1=min(finish, high),
+                                 y0=0.12, y1=0.88, row=2, col=1, layer="above",
+                                 fillcolor=GENE_COLOURS["exon"], line_width=0)
+
+    figure.update_yaxes(range=[0, 1], showticklabels=False, ticks="", showgrid=False,
+                        zeroline=False, row=2, col=1)
+    gene_domain = figure.layout.yaxis2.domain
+    figure.add_annotation(
+        text=(f"<span style='color:{GENE_COLOURS['exon']}'>\u2588</span> exon"
+              f" &nbsp;&nbsp;<span style='color:{GENE_COLOURS['intron']}'><b>\u25ac</b></span> intron"),
+        xref="paper", yref="paper", x=1.01, y=sum(gene_domain) / 2,
+        xanchor="left", yanchor="middle", showarrow=False,
+        font=dict(size=13, color="#3D4653"),
+    )
+
+    # Colour limits come from the whole scan, so a shade means the same thing at any zoom, and
+    # each row is one image however many candidates it covers.
+    for i, (column, label) in enumerate(tracks, start=3):
+        values = data[column].to_numpy(dtype=float)
+        figure.add_trace(
+            go.Heatmap(
+                x=x, z=[values], colorscale=TRACK_SCALE,
+                zmin=float(np.nanmin(values)), zmax=float(np.nanmax(values)),
+                hoverinfo="skip",
+                name=label, showlegend=False,
+                colorbar=dict(orientation="h", thickness=13, len=0.14,
+                              x=1.20, xanchor="left", yanchor="middle",
+                              tickfont=dict(size=8), tickangle=0, outlinewidth=0,
+                              ticklabelposition="outside bottom", tickmode="array",
+                              tickvals=[float(np.nanmin(values)), float(np.nanmax(values))],
+                              ticktext=[f"{np.nanmin(values):.3g}", f"{np.nanmax(values):.3g}"]),
+            ),
+            row=i, col=1,
+        )
+        # An invisible point a candidate: the strip is a raster and has no value to hover, and
+        # this is what puts a number on this row at the position under the cursor.
+        figure.add_trace(
+            go.Scattergl(
+                x=x, y=np.zeros(len(values)), mode="markers",
+                marker=dict(size=1, color="rgba(0,0,0,0)"),
+                # A plain list, not the array: plotly serialises numpy as base64 typed data, which
+                # the crosshair below cannot index.
+                customdata=[None if v != v else float(v) for v in values],
+                name=label, showlegend=False,
+                hovertemplate="%{customdata:.4g}<extra>" + label + "</extra>",
+            ),
+            row=i, col=1,
+        )
+        figure.update_yaxes(showticklabels=False, ticks="", showgrid=False, zeroline=False,
+                            row=i, col=1)
+        middle = sum(figure.layout[f"yaxis{i}"].domain) / 2
+        rows_at.append({"trace": len(figure.data) - 1, "y": middle, "label": label,
+                        "note": len(figure.layout.annotations)})
+        figure.data[-2].colorbar.y = middle - 0.012
+        figure.add_annotation(text=label, xref="paper", yref="paper", x=1.01, y=middle,
+                              xanchor="left", yanchor="middle", showarrow=False,
+                              font=dict(size=11, color="#3D4653"))
+
+    # The whole scan drawn inside the range slider itself, so the window sits on the profile it
+    # navigates rather than in an empty box beneath it. A line, and not WebGL: the slider renders
+    # SVG traces only, and one path is cheaper than thousands of points anyway. The row that owns
+    # it is a sliver, because the slider is the visible copy.
+    figure.add_trace(
+        go.Scatter(
+            x=x, y=scores, mode="lines", hoverinfo="skip", showlegend=False,
+            line=dict(color="#8792A2", width=1),
+        ),
+        row=overview_row, col=1,
+    )
+    figure.update_yaxes(visible=False, row=overview_row, col=1)
+    # The slider draws the traces of the axis it belongs to, so the profile has to live on a real
+    # row. That row is a sliver and is painted over: the slider below is the copy meant to be seen.
+    sliver = figure.layout[f"yaxis{overview_row}"].domain
+    figure.add_shape(type="rect", xref="paper", yref="paper", x0=0, x1=1,
+                     y0=sliver[0] - 0.01, y1=sliver[1] + 0.01,
+                     fillcolor="white", line_width=0, layer="above")
+    figure.update_xaxes(
+        rangeslider=dict(visible=True, thickness=0.13, bgcolor="#FBFCFD",
+                         bordercolor="#D7DBE0", borderwidth=1,
+                         yaxis=dict(rangemode="auto")),
+        row=overview_row, col=1,
+    )
+
+    margin = 0.03 * (float(np.nanmax(scores)) - float(np.nanmin(scores)) or 1)
+    # Nothing zooms vertically: the score axis is pinned to the whole scan, and a drag that also
+    # moved it would put the same score at a different height.
+    figure.update_yaxes(fixedrange=True)
+    figure.update_yaxes(title_text="score", gridcolor="#EEF0F3",
+                        range=[float(np.nanmin(scores)) - margin, float(np.nanmax(scores)) + margin],
+                        row=1, col=1)
+    figure.update_xaxes(showgrid=False, ticks="", showline=False, zeroline=False,
+                        showspikes=True, spikemode="across", spikesnap="cursor",
+                        spikethickness=1, spikedash="dot", spikecolor="#3D4653",
+                        range=[low, min(low + WINDOW_NT, high)])
+    figure.update_xaxes(showticklabels=False, row=overview_row, col=1)
+    figure.update_xaxes(showticklabels=True, side="bottom", ticks="outside", ticklen=3,
+                        title_text="position in the transcript (nt)",
+                        title_font=dict(size=11), title_standoff=2, tickfont=dict(size=10),
+                        row=1, col=1)
+    # Room under the score panel for that scale to sit in.
+    bottom, top = figure.layout.yaxis.domain
+    figure.layout.yaxis.domain = (bottom + 0.085, top)
+    figure.update_layout(
+        width=1040, height=600, dragmode="pan", hovermode="x", plot_bgcolor="white",
+        paper_bgcolor="white", margin=dict(l=56, r=280, t=6, b=16),
+        showlegend=False, hoversubplots="axis", hoverdistance=-1, spikedistance=-1,
+        hoverlabel=dict(bgcolor="white", bordercolor="#D7DBE0",
+                        font=dict(size=11, color="#3D4653")),
+        transition=dict(duration=0),
+    )
+    return figure, rows_at
 
 
+CHART_HTML = """
+<div id="chart"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+  const figure = __FIGURE__;
+  const rows = __ROWS__;
+  const gd = document.getElementById("chart");
+  const shapes = figure.layout.shapes || [];
+  const notes = figure.layout.annotations || [];
+
+  let showing = null;
+
+  Plotly.newPlot(gd, figure.data, figure.layout, __CONFIG__).then(function () {
+    gd.on("plotly_hover", function (event) {
+      const point = event.points[0];
+      const at = point.pointIndex;
+      if (at === undefined || at === showing) { return; }
+      showing = at;
+      const line = {
+        type: "line", xref: "x", yref: "paper", x0: point.x, x1: point.x, y0: 0, y1: 1,
+        line: { color: "#3D4653", width: 1, dash: "dot" }, layer: "above",
+      };
+      const labelled = notes.map(function (note) { return Object.assign({}, note); });
+      rows.forEach(function (row) {
+        const value = gd.data[row.trace].customdata[at];
+        const shown = (value === null || value === undefined)
+          ? "\u2014" : Number(value).toPrecision(3);
+        labelled[row.note].text = row.label + "   <b>" + shown + "</b>";
+        labelled[row.note].opacity = 1;
+        labelled[row.note].bgcolor = "rgba(0,0,0,0)";
+        labelled[row.note].font = { size: 11, color: "#3D4653" };
+      });
+      Plotly.relayout(gd, { shapes: shapes.concat([line]), annotations: labelled });
+    });
+    gd.on("plotly_unhover", function () {
+      showing = null;
+      Plotly.relayout(gd, { shapes: shapes, annotations: notes });
+    });
+  });
+</script>
+"""
+
+
+def _chart_html(figure, rows_at) -> str:
+    """The figure with a crosshair of its own: one line the height of the whole chart, and the
+    value of every feature written on its row."""
+    config = {"scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
+              "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]}
     return (
-        alt.vconcat(*rows, spacing=2, bounds="flush")
-        # Declared for the whole stack: a selection made inside one row is not visible to its
-        # siblings, and the point of this one is that every row responds to it.
-        .add_params(hover)
-        .resolve_scale(x="shared", color="independent")
-        .configure_view(strokeWidth=0)
-        .properties(padding={"left": 0, "top": 4, "right": 4, "bottom": 4})
+        CHART_HTML
+        .replace("__FIGURE__", figure.to_json())
+        .replace("__ROWS__", json.dumps(rows_at))
+        .replace("__CONFIG__", json.dumps(config))
     )
 
 
@@ -434,6 +482,16 @@ def _liability_chips(row):
     return ", ".join(chips) if chips else "-"
 
 
+@st.cache_data(ttl=3600)
+def _result_tables(job_id: str):
+    """The three tables a finished job wrote. Finished results never change, so a rerun reads them
+    from the cache rather than from disk."""
+    return tuple(
+        pd.read_csv(jobs.results_path(job_id, name))
+        for name in ("designed_asos.csv", "safety_detail.csv", "off_targets.csv")
+    )
+
+
 def results_page(job_id: str):
     """Everything one finished job produced, opened from its own address."""
     job = jobs.get(job_id)
@@ -442,6 +500,9 @@ def results_page(job_id: str):
         st.page_link("app.py", label="Design something new")
         return
 
+    st.markdown(
+        "<style>.block-container{max-width:1200px;}</style>", unsafe_allow_html=True
+    )
     st.title("TAUSO")
     parameters = job["parameters"]
 
@@ -458,9 +519,7 @@ def results_page(job_id: str):
         st.error("This job is marked finished but its result tables are missing.")
         return
 
-    designed = pd.read_csv(jobs.results_path(job_id, "designed_asos.csv"))
-    safety = pd.read_csv(jobs.results_path(job_id, "safety_detail.csv"))
-    off_targets = pd.read_csv(jobs.results_path(job_id, "off_targets.csv"))
+    designed, safety, off_targets = _result_tables(job_id)
     # Named, not positional: the explanatory feature columns are appended after it.
     score_column = next(c for c in designed.columns if c.startswith("tauso_score_"))
 
@@ -483,10 +542,12 @@ def results_page(job_id: str):
         "relative to the others here — it ranks candidates, it is not a percent. The tracks beneath "
         "carry the same candidates, each shaded red at the low end of its own range and green at "
         "the high end — so a red **binding dG** mark is the most negative free energy, the "
-        "tightest duplex."
+        "tightest duplex. The strip at the foot is the whole transcript: drag the shaded box on it "
+        "to move the view, or its edges to widen it."
     )
     layout = jobs.get_layout(job_id)
-    st.altair_chart(_position_chart(designed, score_column, layout), use_container_width=False)
+    figure, rows_at = _position_figure(designed, score_column, layout)
+    components.html(_chart_html(figure, rows_at), height=640, scrolling=False)
     if layout:
         exonic = sum(b - a for a, b in layout["exons"])
         st.caption(
