@@ -1,19 +1,25 @@
 import logging
 import os
+import subprocess
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+import pandas as pd
 
 import jobs
 from email_service import send_processing_completed, send_processing_failed, send_processing_started
 from tauso.aso_generation import (
-    _sequence_offtarget_table,
     default_config,
     design_asos,
     summarize_design,
     tox_details,
 )
+from tauso.data.consts import ASO_SEQUENCE, CANONICAL_GENE_NAME
+from tauso.off_target.search import annotate_hits, get_bowtie_index_base
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,14 +30,14 @@ logger = logging.getLogger(__name__)
 DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", "1"))
 # TAUSO_FIRST_N bounds how many tiled candidates are featurised. design_asos tiles 5'->3' and
 # takes the first N windows, so this covers the 5' end of the target rather than sampling across
-# it. Most of a run is fixed cost -- 50 candidates take 87 seconds and 500 take 121 -- so the
-# marginal candidate is cheap and the bound can be generous. Set TAUSO_FIRST_N=0 to tile the whole
-# transcript, which for a 8.8 kb target is around a quarter of an hour.
+# it. Featurising is around 33 seconds of fixed cost plus 0.04 seconds a candidate, so the marginal
+# candidate is cheap and the bound can be generous. Set TAUSO_FIRST_N=0 to tile the whole transcript,
+# which for a 8.8 kb target is around seven minutes.
 FIRST_N = int(os.environ.get("TAUSO_FIRST_N", "500")) or None
-# How many candidates make the shortlist: the table, and the per-candidate bowtie off-target
-# search, which is what this bounds. Every candidate scored is still charted and downloadable --
-# a plot of the winners alone reads as a landscape while hiding exactly the stretches a reader
-# most needs to see are bad.
+# How many candidates make the shortlist: the table, and the bowtie off-target search, which is
+# what this bounds. Every candidate scored is still charted and downloadable -- a plot of the
+# winners alone reads as a landscape while hiding exactly the stretches a reader most needs to
+# see are bad.
 TOP_N = int(os.environ.get("TAUSO_TOP_N", "100"))
 # Mismatch tolerance for the sequence off-target search (0 = perfect matches only).
 OFFTARGET_MAX_DISTANCE = int(os.environ.get("TAUSO_OFFTARGET_MAX_DISTANCE", "2"))
@@ -100,6 +106,9 @@ DEFAULT_CELL_DENSITY = 20000
 ACCESSIBILITY_FEATURE = "access_f60_sinf_u20_a5"
 HYBRIDIZATION_FEATURE = "hybr_dna_rna_dg"
 RNASE_FEATURE = "rnase_score_dinucleotide_R4a_dinuc_dynamic"
+# GC across the ASO itself. It sets how tightly the duplex binds, so it moves several of the
+# hybridization features with it.
+GC_FEATURE = "seq_gc_content"
 # Folding energy of the site itself. The narrow window is the one that varies candidate to
 # candidate, and the one the model leans on; the wide windows barely move along a transcript.
 MFE_FEATURE = "fold_mfe_win25_flank30_step4"
@@ -218,6 +227,85 @@ def _layout_for(config: JobConfig):
         return None
 
 
+OFFTARGET_COLS = ["rank", "aso_sequence", "off_target_gene", "distance", "region", "chrom", "start", "strand"]
+
+
+def _offtarget_table(ranked, *, genome, max_distance, exclude_genes=None):
+    """One row per hit the shortlist makes to a gene other than its target: the mismatch count,
+    the region, and the locus.
+
+    tauso's `_sequence_offtarget_table` aligns one sequence per Bowtie process, and each process
+    reloads the genome index -- 0.6 s of index against 25 ms of alignment. Searching the shortlist
+    in a single run costs the index once.
+    """
+    from tauso.data.data import get_paths
+
+    paths = get_paths(genome)
+    sentinel = os.path.join(os.path.dirname(paths["fasta"]), f"{genome}_bowtie_index", "SUCCESS")
+    if not os.path.exists(sentinel):
+        raise FileNotFoundError(
+            f"Bowtie index for {genome} not found; run `tauso setup-bowtie --genome {genome}`."
+        )
+
+    exclude = set(exclude_genes or []) | set(pd.Series(ranked[CANONICAL_GENE_NAME]).dropna().unique())
+    rank_of = {seq: i + 1 for i, seq in enumerate(ranked[ASO_SEQUENCE].tolist())}
+    unique_seqs = list(dict.fromkeys(ranked[ASO_SEQUENCE].tolist()))
+    if not unique_seqs:
+        return pd.DataFrame(columns=OFFTARGET_COLS)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # The sequence is its own FASTA name, so the alignment carries it back without a lookup.
+        fasta = Path(tmp) / "shortlist.fasta"
+        fasta.write_text("".join(f">{seq}\n{seq}\n" for seq in unique_seqs))
+        alignment = subprocess.run(
+            ["bowtie", "-v", str(max_distance), "-a", "-S", "--sam-nohead",
+             "-f", "-x", get_bowtie_index_base(genome=genome), str(fasta)],
+            capture_output=True, text=True, check=True,
+        )
+
+    hits = []
+    for line in alignment.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        flag = int(fields[1])
+        if flag & 4:
+            continue
+        sequence, chrom, start = fields[0], fields[2], int(fields[3]) - 1
+        mismatches = next((int(t.split(":")[2]) for t in fields[11:] if t.startswith("NM:i:")), 0)
+        hits.append(
+            {
+                "chrom": chrom,
+                "start": start,
+                "end": start + len(sequence),
+                "strand": "-" if flag & 16 else "+",
+                "mismatches": mismatches,
+                "sequence": sequence,
+            }
+        )
+
+    annotated = annotate_hits(hits, genome=genome)
+    if annotated.empty:
+        return pd.DataFrame(columns=OFFTARGET_COLS)
+    tbl = annotated[annotated["gene_name"].notna() & ~annotated["gene_name"].isin(exclude)]
+    if tbl.empty:
+        return pd.DataFrame(columns=OFFTARGET_COLS)
+
+    out = pd.DataFrame(
+        {
+            "rank": tbl["sequence"].map(rank_of).to_numpy(),
+            "aso_sequence": tbl["sequence"].to_numpy(),
+            "off_target_gene": tbl["gene_name"].to_numpy(),
+            "distance": tbl["mismatches"].to_numpy(),
+            "region": tbl["region_type"].to_numpy(),
+            "chrom": tbl["chrom"].to_numpy(),
+            "start": tbl["start"].to_numpy(),
+            "strand": tbl["strand"].to_numpy(),
+        }
+    )
+    return out.sort_values(["rank", "distance", "off_target_gene", "start"]).reset_index(drop=True)
+
+
 def execute_tauso_pipeline(config: JobConfig):
     """Design ASOs for the target end-to-end and email the ranked results, safety detail, and
     per-candidate sequence off-target hits. Runs in an isolated background process."""
@@ -261,7 +349,7 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"Scored {len(ranked)} candidate ASOs; building result tables...")
 
         shortlist = ranked.head(TOP_N)
-        off_targets = _sequence_offtarget_table(
+        off_targets = _offtarget_table(
             shortlist,
             genome="GRCm39" if design_config.organism_name == "mouse" else "GRCh38",
             max_distance=OFFTARGET_MAX_DISTANCE,
@@ -270,7 +358,8 @@ def execute_tauso_pipeline(config: JobConfig):
         logger.info(f"{len(off_targets)} off-target hits across the top {len(shortlist)}.")
 
         designed = summarize_design(ranked)
-        for column in (ACCESSIBILITY_FEATURE, MFE_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE):
+        for column in (ACCESSIBILITY_FEATURE, MFE_FEATURE, HYBRIDIZATION_FEATURE, RNASE_FEATURE,
+                       GC_FEATURE):
             if column in ranked.columns:
                 designed[column] = ranked[column].to_numpy()
         safety = tox_details(shortlist)
