@@ -21,12 +21,17 @@ from tauso.aso_generation import (
 from tauso.data.consts import ASO_SEQUENCE, CANONICAL_GENE_NAME
 from tauso.off_target.search import annotate_hits, get_bowtie_index_base
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
-# design_asos runs inside the daemonic ProcessPool worker below, which cannot spawn its own child
-# processes, so feature computation stays single-process. Raising TAUSO_DESIGN_JOBS above 1 requires
-# a non-daemonic executor.
+# Cores for feature computation inside one design job. An earlier note here claimed the
+# ProcessPool worker below was daemonic and so could not spawn children; that is no longer true --
+# on the image's Python 3.12 the executor's workers are non-daemonic and nested pools work, so
+# joblib/loky in tauso's calculators parallelises normally. Verified in-container 2026-09-07.
 DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", "1"))
 # TAUSO_FIRST_N bounds how many tiled candidates are featurised. design_asos tiles 5'->3' and
 # takes the first N windows, so this covers the 5' end of the target rather than sampling across
@@ -127,13 +132,101 @@ def exon_layout(locus) -> dict:
     a positive-strand exon is measured from the start and a negative-strand one from the end."""
     length = len(locus.full_mrna) if locus.full_mrna else 0
     reverse = str(getattr(locus, "strand", "")).endswith("NEG") or getattr(locus, "strand", 1) == -1
-    exons = []
-    for start, end in getattr(locus, "_exon_indices", []):
-        if reverse:
-            exons.append([locus.gene_end - end, locus.gene_end - start])
+
+    def offsets(intervals):
+        out = []
+        for start, end in intervals or []:
+            if reverse:
+                out.append([locus.gene_end - end, locus.gene_end - start])
+            else:
+                out.append([start - locus.gene_start, end - locus.gene_start])
+        return sorted(out)
+
+    # The UTRs are exonic, so they are subsets of the exon spans rather than a separate track --
+    # the chart draws them over the exons to show which part of an exon is untranslated.
+    return {
+        "length": length,
+        "exons": offsets(getattr(locus, "_exon_indices", [])),
+        "utr5": offsets(getattr(locus, "_5utr_indices", [])),
+        "utr3": offsets(getattr(locus, "_3utr_indices", [])),
+    }
+
+
+SITE_REGION = "site_region"
+REPEAT_NOTE = "repeat_note"
+COMPLEMENT = str.maketrans("ACGTU", "TGCAA")
+
+
+def _region_at(position: int, length: int, exons, span) -> str:
+    """Where one site sits in the gene model: exonic if it overlaps an exon, intronic if it falls
+    between them inside the transcript, unannotated if it is outside the transcript altogether.
+
+    Coarser than tauso's own `target_region`, which separates the UTRs -- the layout carries exon
+    bounds only. It is computed per site, so the copies of a repeated candidate are each labelled
+    where they actually are rather than inheriting the first occurrence's label.
+    """
+    if not exons:
+        return "unannotated"
+    start, end = position, position + length
+    if end <= span[0] or start >= span[1]:
+        return "unannotated"
+    return "exon" if any(start < b and end > a for a, b in exons) else "intron"
+
+
+def annotate_repeat_sites(designed: pd.DataFrame, pre_mrna: Optional[str], layout: Optional[dict]):
+    """Give every copy of a repeated candidate its own position, and say which copy was scored.
+
+    design_asos keys candidates by sequence, so a k-mer occurring several times in the target --
+    which a tandem repeat guarantees -- collapses onto its first occurrence: each copy is emitted
+    as its own row, but all of them carry that one start. The chart then draws a hole over the
+    repeat while the surplus rows stack on a single point. The true positions are recoverable by
+    re-scanning the target, so they are handed back here, and every copy after the first says so
+    explicitly: it was not scored where it is drawn.
+    """
+    if designed.empty or not pre_mrna or ASO_SEQUENCE not in designed or "target_start" not in designed:
+        return designed
+
+    exons = [tuple(e) for e in (layout or {}).get("exons", [])]
+    span = (min(a for a, _ in exons), max(b for _, b in exons)) if exons else (0, 0)
+
+    # An ASO is antisense to its target, so a candidate's sequence is the reverse complement of the
+    # window it binds. The index is keyed that way round so a candidate looks itself up directly.
+    sequences = designed[ASO_SEQUENCE].astype(str).str.upper()
+    target = pre_mrna.upper()
+    sites: dict[str, list[int]] = {}
+    for width in sorted({len(s) for s in sequences}):
+        for i in range(len(target) - width + 1):
+            antisense = target[i:i + width].translate(COMPLEMENT)[::-1]
+            sites.setdefault(antisense, []).append(i)
+
+    starts, regions, notes = [], [], []
+    seen: dict[str, int] = {}
+    for sequence, original in zip(sequences, designed["target_start"]):
+        found = sites.get(sequence, [])
+        index = seen.get(sequence, 0)
+        seen[sequence] = index + 1
+        position = found[index] if index < len(found) else (found[0] if found else int(original))
+        starts.append(position)
+        regions.append(_region_at(position, len(sequence), exons, span))
+        if len(found) < 2:
+            notes.append("")
+        elif index == 0:
+            others = ", ".join(f"{p:,}" for p in found[1:])
+            notes.append(f"first of {len(found)} identical sites (also at {others})")
         else:
-            exons.append([start - locus.gene_start, end - locus.gene_start])
-    return {"length": length, "exons": sorted(exons)}
+            notes.append(
+                f"identical to the site at {found[0]:,}, which is where it was scored -- "
+                f"this copy carries that score, not one computed here"
+            )
+
+    annotated = designed.copy()
+    annotated["target_start"] = starts
+    annotated[SITE_REGION] = regions
+    annotated[REPEAT_NOTE] = notes
+    repeats = sum(1 for n in notes if n)
+    if repeats:
+        logger.info(f"{repeats} candidates share a sequence with another site; positions restored.")
+    return annotated
 
 
 def describe_chemistry(chemical_pattern: str, ps_pattern: str) -> str:
@@ -213,18 +306,24 @@ class JobConfig:
         return f"{'MOE' if 'M' in wings else 'cEt' if 'C' in wings else 'LNA'}/5-methylcytosines/deoxy"
 
 
-def _layout_for(config: JobConfig):
-    """The gene model for this job's target, or None for a sequence the user supplied."""
+def _locus_for(config: JobConfig):
+    """This job's target locus, or None for a sequence the user supplied. Fetched once: the layout
+    and the pre-mRNA the repeat scan needs both come off it."""
     if config.target_data:
         return None
     try:
         from tauso.populate.calculators.cache import AssetCache
 
-        locus = AssetCache(genome="GRCh38").get_full_gene_data().get(config.target_mrna_name)
-        return exon_layout(locus) if locus else None
+        return AssetCache(genome="GRCh38").get_full_gene_data().get(config.target_mrna_name)
     except Exception:
         logger.warning("Could not read the gene model for %s", config.target_mrna_name)
         return None
+
+
+def _layout_for(config: JobConfig):
+    """The gene model for this job's target, or None for a sequence the user supplied."""
+    locus = _locus_for(config)
+    return exon_layout(locus) if locus else None
 
 
 OFFTARGET_COLS = ["rank", "aso_sequence", "off_target_gene", "distance", "region", "chrom", "start", "strand"]
@@ -332,7 +431,9 @@ def execute_tauso_pipeline(config: JobConfig):
         # A DB-gene selection leaves target_data empty -> the target is looked up from the genome cache.
         # The oligo length comes from the sugar pattern: several features return NaN unless the
         # pattern is exactly as long as the ASO.
-        layout = None
+        locus = _locus_for(config)
+        layout = exon_layout(locus) if locus else None
+        pre_mrna = getattr(locus, "full_mrna", None) if locus else None
         # Scored without a cutoff, so the whole scan is available to chart; the shortlist below
         # is what the off-target search and the table are bounded to.
         ranked = design_asos(
@@ -362,6 +463,7 @@ def execute_tauso_pipeline(config: JobConfig):
                        GC_FEATURE):
             if column in ranked.columns:
                 designed[column] = ranked[column].to_numpy()
+        designed = annotate_repeat_sites(designed, pre_mrna, layout)
         safety = tox_details(shortlist)
         jobs.save_results(
             config.job_id,
@@ -372,7 +474,7 @@ def execute_tauso_pipeline(config: JobConfig):
             },
         )
         jobs.save_features(config.job_id, ranked)
-        jobs.save_layout(config.job_id, layout or _layout_for(config))
+        jobs.save_layout(config.job_id, layout)
         jobs.mark(config.job_id, jobs.DONE)
 
         send_processing_completed(config.user_email, config.source_info, jobs.public_url(config.job_id))

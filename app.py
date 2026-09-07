@@ -249,7 +249,7 @@ WINDOW_NT = 2000
 CANDIDATES = "candidates"
 
 TRACK_SCALE = [(0.0, "#cf4c41"), (0.5, "#e9b23c"), (1.0, "#4aa058")]
-GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2"}
+GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2", "utr5": "#2A78D6", "utr3": "#B4762E"}
 
 def _position_figure(designed, score_column, layout=None):
     """Score against transcript position, with the structure and binding of each candidate on their
@@ -304,16 +304,32 @@ def _position_figure(designed, score_column, layout=None):
                 figure.add_shape(type="rect", x0=max(begin, low), x1=min(finish, high),
                                  y0=0.12, y1=0.88, row=2, col=1, layer="above",
                                  fillcolor=GENE_COLOURS["exon"], line_width=0)
+        # Drawn over the exons, and shorter, so an exon reads as coding where no UTR covers it.
+        # Older jobs were saved before the layout carried UTRs, hence the default.
+        for key in ("utr5", "utr3"):
+            for begin, finish in layout.get(key, []):
+                if finish > low and begin < high:
+                    figure.add_shape(type="rect", x0=max(begin, low), x1=min(finish, high),
+                                     y0=0.26, y1=0.74, row=2, col=1, layer="above",
+                                     fillcolor=GENE_COLOURS[key], line_width=0)
 
     figure.update_yaxes(range=[0, 1], showticklabels=False, ticks="", showgrid=False,
                         zeroline=False, row=2, col=1)
     gene_domain = figure.layout.yaxis2.domain
+    # "canonical" heads the key because every span below it comes from the canonical transcript,
+    # while the axis spans the whole gene -- sequence outside that transcript is neither exon nor
+    # intron here, and saying so stops the unshaded stretches being read as intronic.
     figure.add_annotation(
-        text=(f"<span style='color:{GENE_COLOURS['exon']}'>\u2588</span> exon"
-              f" &nbsp;&nbsp;<span style='color:{GENE_COLOURS['intron']}'><b>\u25ac</b></span> intron"),
-        xref="paper", yref="paper", x=1.01, y=sum(gene_domain) / 2,
-        xanchor="left", yanchor="middle", showarrow=False,
-        font=dict(size=13, color="#3D4653"),
+        text=(f"<b>canonical</b><br>"
+              f"<span style='color:{GENE_COLOURS['exon']}'>\u2588</span> exon"
+              f" &nbsp;<span style='color:{GENE_COLOURS['intron']}'><b>\u25ac</b></span> intron<br>"
+              f"<span style='color:{GENE_COLOURS['utr5']}'>\u2588</span> 5'UTR"
+              f" &nbsp;<span style='color:{GENE_COLOURS['utr3']}'>\u2588</span> 3'UTR"),
+        # Nudged up: the key grew to three lines, and centring it on the track leaves the last
+        # line hanging below the gene bar. This sits the block level with the track it describes.
+        xref="paper", yref="paper", x=1.01, y=sum(gene_domain) / 2 + 0.035,
+        xanchor="left", yanchor="middle", showarrow=False, align="left",
+        font=dict(size=12, color="#3D4653"),
     )
 
     # Colour limits come from the whole scan, so a shade means the same thing at any zoom, and
@@ -572,6 +588,11 @@ def results_page(job_id: str):
     hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
     accessibility = merged.get(ACCESSIBILITY_FEATURE)
     binding = merged.get(HYBRIDIZATION_FEATURE)
+    # Only worth a column when something in the shortlist actually repeats; a run with no repeated
+    # candidate leaves it None and dropna below takes the column out.
+    repeat_note = merged["repeat_note"] if "repeat_note" in merged else None
+    if repeat_note is not None and not (repeat_note.fillna("").astype(str).str.strip() != "").any():
+        repeat_note = None
     one_mismatch = merged["aso_sequence"].map(hits.get(1, {})).fillna(0).astype(int)
     two_mismatch = merged["aso_sequence"].map(hits.get(2, {})).fillna(0).astype(int)
     table = pd.DataFrame(
@@ -579,6 +600,8 @@ def results_page(job_id: str):
             "#": merged["rank"],
             "sequence (5'->3')": merged["aso_sequence"],
             "start": merged["target_start"],
+            "region": merged["site_region"] if "site_region" in merged else None,
+            "repeat": repeat_note,
             "score": merged[score_column].round(2),
             "open": accessibility.round(2) if accessibility is not None else None,
             "binding": binding.round(1) if binding is not None else None,
@@ -599,7 +622,10 @@ def results_page(job_id: str):
         "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
         "**MFE** is the folding energy of the site itself, more negative being more structured; **RNase H1** is how well the local dinucleotide context suits the enzyme "
         "that cuts. "
-        "**1mm** and **2mm** count genomic hits to a gene other than the target."
+        "**1mm** and **2mm** count genomic hits to a gene other than the target. "
+        "**region** is where that site sits in the gene model. **repeat** appears when the same "
+        "sequence occurs at more than one site in the target: each copy is drawn at its own "
+        "position, but only the first was scored, and the others carry that score."
     )
 
     st.subheader("Downloads")
