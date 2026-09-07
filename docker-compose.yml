@@ -15,9 +15,17 @@ services:
       start_period: 30m
       retries: 3
 
-    # A design job holds the genome and transcriptomes in memory; this bounds it well
-    # above what one job needs while leaving the host usable.
-    mem_limit: 16g
+    # A design job holds the genome and transcriptomes in memory. This has to sit BELOW what the
+    # WSL VM actually has (8 GB, set in .wslconfig), or it bounds nothing: the kernel OOM-killer
+    # fires first and takes the whole VM into swap. Under this cap an overrunning job kills its
+    # own container -- a clean, visible failure with the host still responsive.
+    mem_limit: 7g
+    # pandarallel pickles its chunks through /dev/shm, and Docker's default 64 MB is exhausted the
+    # moment a whole-transcript frame is sharded across 8 workers -- it surfaces as the very
+    # misleading "[Errno 28] No space left on device" while the disk is 80% free. These pages count
+    # against mem_limit above, so the two are sized together: 4g of shm inside a 7g cap leaves
+    # roughly 3g for the working set, and the VM's own 8 GB is what both now press against.
+    shm_size: 4gb
     # Jobs are queued one at a time, but featurising is threaded and a whole-transcript
     # scan will take every core it is given.
     cpus: 12
@@ -45,18 +53,36 @@ services:
     environment:
       - PORT=8501
       - TAUSO_DATA_DIR=/home/mambauser/.tauso_data
+      # Cores for feature computation within a single design job. Jobs still run one at a time;
+      # this parallelises the calculators (MFE, accessibility, CAI/ENC, RBP motifs) inside one.
+      # Held under the `cpus` ceiling above, and well under it, because each joblib/loky worker
+      # is a process with its own copy of the working set.
+      - TAUSO_DESIGN_JOBS=8
+      # 0 tiles the whole transcript instead of stopping after the first N windows from the 5' end.
+      # Cost is roughly 0.04 s a candidate in featurisation, so a 8.6 kb transcript like MYO6 adds
+      # a few minutes over the old 500-window bound.
+      - TAUSO_FIRST_N=0
 
   # The public front door, started with `docker compose --profile public up -d`. It dials out
   # to Cloudflare and serves the app over that connection, so the host opens no port and never
-  # exposes its address. Needs TUNNEL_TOKEN in .env.local, from the tunnel's page in the
-  # Cloudflare dashboard, with its public hostname pointed at http://tauso-web:8501.
+  # exposes its address.
+  #
+  # This is a Quick Tunnel: Cloudflare assigns a random *.trycloudflare.com hostname, so it needs
+  # no domain and no token. Read the address out of `docker compose logs cloudflared`. Two things
+  # follow from it -- the name changes on every restart, which stales the links already mailed out
+  # via PUBLIC_BASE_URL, and Zero Trust Access cannot be applied to a trycloudflare.com hostname,
+  # so the job queue is open to anyone holding the URL. It suits a demo, not a standing service.
+  #
+  # To go back to a named tunnel on a real domain: restore `command: tunnel --no-autoupdate run`
+  # and the `env_file` below, put TUNNEL_TOKEN in .env.local, and point the tunnel's route at
+  # http://tauso-web:8501 (http, not https; 8501, not 8502).
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --no-autoupdate run
+    command: tunnel --no-autoupdate --url http://tauso-web:8501
     profiles:
       - public
-    env_file:
-      - .env.local
+    # No env_file: a Quick Tunnel takes no token, and a stray TUNNEL_TOKEN in the environment
+    # would send cloudflared looking for the named tunnel instead.
     depends_on:
       - tauso-web
