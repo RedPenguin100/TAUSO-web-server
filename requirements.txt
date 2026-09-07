@@ -1,9 +1,14 @@
 # Web-server pip dependencies, installed on top of the TAUSO conda environment.
 # TAUSO itself (and its conda stack: RIsearch, raccess, pyranges, gffutils, ...) is
 # installed separately from its pinned source -- see the Dockerfile.
-streamlit
-watchdog
-python-dotenv
-brevo-python<4.0.0
-biopython
-plotly
+#
+# Pinned exactly. The Dockerfile pins TAUSO to a commit, so letting these float would leave the
+# build reproducible in name only: a rebuild months from now would resolve whatever PyPI serves
+# that day, and a Streamlit major would break the UI with nothing in the diff to explain it.
+# Versions below are what the 2026-09-08 image ran. Bump them deliberately.
+streamlit==1.63.0
+watchdog==6.0.0
+python-dotenv==1.2.3
+brevo-python==1.2.0
+biopython==1.88
+plotly==7.0.0

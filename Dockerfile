@@ -8,7 +8,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Grab the ultra-fast uv installer directly from Astral's official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pinned like everything else: uv resolves the pip layer, so a floating version can change
+# what gets installed even when requirements.txt has not moved.
+COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /uvx /bin/
 
 # Switch back to the default mamba user
 USER $MAMBA_USER
@@ -22,11 +24,22 @@ USER $MAMBA_USER
 ENV TAUSO_WORKSPACE=/home/mambauser/tauso_workspace
 ENV TAUSO_DATA_DIR=/home/mambauser/.tauso_data
 
+# Dependencies are installed BEFORE the source, so bumping TAUSO_COMMIT below does not drag the
+# whole conda stack and the 1.3 GB of Streamlit/plotly/biopython through a reinstall with it.
+# environment.yml is vendored here for that reason: read from the clone it would be a child of the
+# commit, and every bump would re-solve the environment. The build fails loudly further down if
+# the vendored copy has drifted from the pinned revision's own.
+WORKDIR $TAUSO_WORKSPACE/build
+COPY environment.yml requirements.txt ./
+RUN micromamba install -y -n base -f environment.yml && \
+    micromamba clean --all --yes
+RUN micromamba run -n base uv pip install --system -r requirements.txt
+
 # Set working directory strictly for the TAUSO source code
 WORKDIR $TAUSO_WORKSPACE/code
 
 # Pin the TAUSO source to a specific main commit for reproducible builds.
-ARG TAUSO_COMMIT=103c69b7b177ded46ad62a95f9d4aff13b66d14c
+ARG TAUSO_COMMIT=3c9a6b483dd69b5b3e1903f44806661eafa0990c
 RUN git init -q . && \
     git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
     git config core.sparseCheckout true && \
@@ -35,12 +48,17 @@ RUN git init -q . && \
     git checkout -q FETCH_HEAD && \
     git submodule update --init --recursive
 
-# Install dependencies and the TAUSO package natively
-RUN micromamba install -y -n base -f environment.yml && \
-    micromamba clean --all --yes
+# The vendored spec is what the environment above was built from. If this commit asks for anything
+# different, stop: the alternative is an image whose conda stack silently does not match its source.
+RUN cmp -s $TAUSO_WORKSPACE/build/environment.yml environment.yml || { \
+        echo "ERROR: vendored environment.yml differs from TAUSO ${TAUSO_COMMIT}."; \
+        echo "Refresh it:  git -C <tauso> show ${TAUSO_COMMIT}:environment.yml > environment.yml"; \
+        diff $TAUSO_WORKSPACE/build/environment.yml environment.yml || true; \
+        exit 1; \
+    }
 
-COPY requirements.txt ./
-RUN micromamba run -n base uv pip install --system . -r requirements.txt
+# Only the TAUSO package itself; its dependencies came from the layers above.
+RUN micromamba run -n base uv pip install --system .
 
 # Add the protobuf fallback environment variable
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
