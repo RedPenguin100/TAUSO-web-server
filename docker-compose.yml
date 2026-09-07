@@ -18,8 +18,22 @@ services:
     # A design job holds the genome and transcriptomes in memory; this bounds it well
     # above what one job needs while leaving the host usable.
     mem_limit: 16g
+    # Jobs are queued one at a time, but featurising is threaded and a whole-transcript
+    # scan will take every core it is given.
+    cpus: 12
+    pids_limit: 512
+
+    # The container serves whatever the internet sends it, so it gets nothing it does not
+    # need: no capabilities, and no way to gain privileges it was not started with.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Reachable from this host only. The tunnel below is the way in from outside; nothing
+    # else on the network can reach the app directly.
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - ./.tauso_data:/home/mambauser/.tauso_data
 
@@ -31,3 +45,18 @@ services:
     environment:
       - PORT=8501
       - TAUSO_DATA_DIR=/home/mambauser/.tauso_data
+
+  # The public front door, started with `docker compose --profile public up -d`. It dials out
+  # to Cloudflare and serves the app over that connection, so the host opens no port and never
+  # exposes its address. Needs TUNNEL_TOKEN in .env.local, from the tunnel's page in the
+  # Cloudflare dashboard, with its public hostname pointed at http://tauso-web:8501.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    profiles:
+      - public
+    env_file:
+      - .env.local
+    depends_on:
+      - tauso-web
