@@ -1,0 +1,158 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  :root { --ink:#141A22; --muted:#5A6473; --line:#D7DDE5; --bg:#FBFCFD; --accent:#2A78D6; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink);
+         background:transparent; }
+  #box { position:relative; width:260px; }
+  #q { width:100%; padding:8px 30px 8px 10px; border:1px solid var(--line); border-radius:8px;
+       background:var(--bg); color:var(--ink); font:inherit; outline:none; }
+  #q:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(42,120,214,.15); }
+  #clear { position:absolute; right:8px; top:7px; width:18px; height:18px; border:0; padding:0;
+           border-radius:50%; background:transparent; color:var(--muted); cursor:pointer;
+           font:14px/1 system-ui; display:none; }
+  #clear:hover { background:#ECEFF4; color:var(--ink); }
+  #vp { display:none; height:150px; overflow-y:auto; margin-top:4px; border:1px solid var(--line);
+        border-radius:8px; background:#fff; position:relative;
+        box-shadow:0 6px 16px rgba(20,26,34,.08); }
+  #spacer { position:relative; width:100%; }
+  #rows { position:absolute; left:0; right:0; top:0; }
+  .row { height:28px; line-height:28px; padding:0 10px; cursor:pointer; white-space:nowrap;
+         overflow:hidden; text-overflow:ellipsis; }
+  .row.active { background:#ECEFF4; }
+  .row.sel { background:var(--accent); color:#fff; }
+  #empty { padding:10px; color:var(--muted); }
+</style>
+
+<div id="box">
+  <input id="q" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false">
+  <button id="clear" title="clear">&#10005;</button>
+  <div id="vp"><div id="spacer"><div id="rows"></div></div></div>
+</div>
+
+<script>
+const ROW = 28, BUFFER = 6;
+let all = [], view = [], chosen = null, active = -1, open = false, ready = false;
+
+const q = document.getElementById("q");
+const vp = document.getElementById("vp");
+const spacer = document.getElementById("spacer");
+const rowsEl = document.getElementById("rows");
+const clearBtn = document.getElementById("clear");
+
+function post(m){ window.parent.postMessage(Object.assign({isStreamlitMessage:true}, m), "*"); }
+function fit(){ post({type:"streamlit:setFrameHeight", height: document.body.scrollHeight + 8}); }
+
+// Only the rows inside the viewport become DOM nodes; the spacer reserves the full height so the
+// scrollbar and the count still describe every match. That is what keeps this independent of the
+// list size -- opening, closing and clearing all touch the same handful of nodes.
+function draw(){
+  const total = view.length;
+  spacer.style.height = (total * ROW) + "px";
+  const start = Math.max(0, Math.floor(vp.scrollTop / ROW) - BUFFER);
+  const end = Math.min(total, start + Math.ceil(vp.clientHeight / ROW) + BUFFER * 2);
+  rowsEl.style.transform = "translateY(" + (start * ROW) + "px)";
+  let html = "";
+  for (let i = start; i < end; i++){
+    let cls = "row";
+    if (i === active) cls += " active";
+    if (view[i] === chosen) cls += " sel";
+    html += '<div class="' + cls + '" data-i="' + i + '">' + view[i] + '</div>';
+  }
+  rowsEl.innerHTML = total ? html : '<div id="empty">no gene matches that</div>';
+  clearBtn.style.display = (chosen || q.value) ? "block" : "none";
+}
+
+function setOpen(state){
+  if (open === state) return;
+  open = state;
+  vp.style.display = state ? "block" : "none";
+  q.setAttribute("aria-expanded", state ? "true" : "false");
+  draw();
+  fit();
+}
+
+function filter(){
+  const term = q.value.trim().toUpperCase();
+  if (!term) view = all;
+  else {
+    const pre = [], mid = [];
+    for (let i = 0; i < all.length; i++){
+      const u = all[i].toUpperCase();
+      if (u.startsWith(term)) pre.push(all[i]);
+      else if (u.indexOf(term) !== -1) mid.push(all[i]);
+    }
+    view = pre.concat(mid);
+  }
+  active = view.length ? 0 : -1;
+  vp.scrollTop = 0;
+  draw();
+}
+
+function reveal(){
+  if (active < 0) return;
+  const top = active * ROW, bottom = top + ROW;
+  if (top < vp.scrollTop) vp.scrollTop = top;
+  else if (bottom > vp.scrollTop + vp.clientHeight) vp.scrollTop = bottom - vp.clientHeight;
+  draw();
+}
+
+function commit(name){
+  chosen = name;
+  q.value = name;
+  setOpen(false);
+  draw();
+  post({type:"streamlit:setComponentValue", value: chosen, dataType:"json"});
+}
+
+function clearAll(){
+  chosen = null; q.value = ""; filter(); setOpen(false);
+  post({type:"streamlit:setComponentValue", value: null, dataType:"json"});
+}
+
+q.addEventListener("focus", () => { q.select(); filter(); setOpen(true); });
+q.addEventListener("input", () => { filter(); setOpen(true); });
+q.addEventListener("blur", () => setTimeout(() => setOpen(false), 150));
+clearBtn.addEventListener("mousedown", e => { e.preventDefault(); clearAll(); });
+vp.addEventListener("scroll", draw);
+rowsEl.addEventListener("mousedown", e => {
+  const el = e.target.closest(".row");
+  if (!el) return;
+  e.preventDefault();
+  commit(view[+el.dataset.i]);
+});
+
+q.addEventListener("keydown", e => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault();
+    if (!open){ setOpen(true); return; }
+    if (!view.length) return;
+    active += (e.key === "ArrowDown" ? 1 : -1);
+    if (active < 0) active = view.length - 1;
+    if (active >= view.length) active = 0;
+    reveal();
+  } else if (e.key === "Enter"){
+    e.preventDefault();
+    if (open && active >= 0 && active < view.length) commit(view[active]);
+  } else if (e.key === "Escape"){
+    setOpen(false);
+  }
+});
+
+window.addEventListener("message", e => {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  const a = e.data.args || {};
+  if (ready) return;
+  all = a.genes || [];
+  chosen = a.value || null;
+  q.placeholder = a.placeholder || "Search a gene";
+  if (chosen) q.value = chosen;
+  view = all;
+  ready = true;
+  draw();
+  fit();
+});
+
+post({type:"streamlit:componentReady", apiVersion:1});
+</script>

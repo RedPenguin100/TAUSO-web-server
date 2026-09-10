@@ -21,18 +21,91 @@ from tauso.aso_generation import (
 from tauso.data.consts import ASO_SEQUENCE, CANONICAL_GENE_NAME
 from tauso.off_target.search import annotate_hits, get_bowtie_index_base
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
+LOG_FORMAT = "%(asctime)s %(levelname)s: %(message)s"
+
+
+class ColourFormatter(logging.Formatter):
+    """Dim the timestamp and colour the level, so an ERROR is findable in a wall of INFO.
+
+    Only installed when the stream is a terminal -- `tty: true` in the compose file is what makes
+    that true inside the container. Redirect the logs to a file and this falls back to plain text
+    rather than filling it with escape codes.
+    """
+
+    DIM = "\033[38;5;245m"
+    RESET = "\033[0m"
+    LEVEL = {
+        logging.DEBUG: "\033[38;5;245m",
+        logging.INFO: "\033[36m",
+        logging.WARNING: "\033[33m",
+        logging.ERROR: "\033[31m",
+        logging.CRITICAL: "\033[1;31m",
+    }
+
+    def format(self, record):
+        colour = self.LEVEL.get(record.levelno, "")
+        stamp = f"{self.DIM}{self.formatTime(record, self.datefmt)}{self.RESET}"
+        level = f"{colour}{record.levelname}{self.RESET}"
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{self.formatException(record.exc_info)}"
+        return f"{stamp} {level}: {message}"
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    ColourFormatter(datefmt="%H:%M:%S")
+    if getattr(_handler.stream, "isatty", lambda: False)()
+    else logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S")
 )
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger(__name__)
 
-# Cores for feature computation inside one design job. An earlier note here claimed the
-# ProcessPool worker below was daemonic and so could not spawn children; that is no longer true --
-# on the image's Python 3.12 the executor's workers are non-daemonic and nested pools work, so
-# joblib/loky in tauso's calculators parallelises normally. Verified in-container 2026-09-07.
-DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", "1"))
+# The machine budget, declared once in the compose file and derived from here by everything that
+# can spend it -- feature computation and the bowtie off-target search alike. Stating it beats
+# hardcoding a number per call site: the two were already inconsistent, with featurisation on eight
+# workers while bowtie ran single-threaded under a twelve-core limit.
+CORES = int(os.environ.get("TAUSO_CORES", "0")) or (os.cpu_count() or 1)
+MEMORY_MB = int(os.environ.get("TAUSO_MEMORY_MB", "0"))
+
+# Measured on this image rather than guessed: the parent peaked at ~4.4 GB while parsing the SAM
+# from a whole-transcript run, and each joblib/loky worker sat near 130 MB RSS, so 300 MB a worker
+# leaves roughly two-fold headroom.
+PARENT_MB = 4400
+PER_WORKER_MB = 300
+
+
+def _affordable_cores() -> int:
+    """Cores we can actually pay for, which is not always the cores we were given.
+
+    Every worker is a process with its own copy of the working set, so past a point more of them
+    only buys an OOM kill. Where the memory budget is stated, it caps the core count.
+    """
+    cores = max(1, min(CORES, os.cpu_count() or CORES))
+    if MEMORY_MB > 0:
+        affordable = max(1, (MEMORY_MB - PARENT_MB) // PER_WORKER_MB)
+        if affordable < cores:
+            logger.info(
+                f"Memory budget {MEMORY_MB} MB allows {affordable} workers, not {cores}; using "
+                f"{affordable}."
+            )
+            return affordable
+    return cores
+
+
+WORKERS = _affordable_cores()
+
+# The off-target stage runs after featurisation, on top of everything featurisation still holds --
+# the cached genome and transcriptomes, the feature frame, the worker processes -- and it is where
+# the container has been pushed past its memory limit. It therefore gets its own, smaller budget
+# rather than the machine-wide one. Featurisation is unaffected and keeps WORKERS.
+OFFTARGET_WORKERS = max(1, min(int(os.environ.get("TAUSO_OFFTARGET_CORES", "4")), WORKERS))
+
+# An explicit TAUSO_DESIGN_JOBS still wins, for pinning one job's featurisation without touching
+# the rest. An earlier note here claimed the ProcessPool worker below was daemonic and so could
+# not spawn children; that is no longer true -- on the image's Python 3.12 the executor's workers
+# are non-daemonic and nested pools work. Verified in-container 2026-09-07.
+DESIGN_JOBS = int(os.environ.get("TAUSO_DESIGN_JOBS", str(WORKERS)))
 # TAUSO_FIRST_N bounds how many tiled candidates are featurised. design_asos tiles 5'->3' and
 # takes the first N windows, so this covers the 5' end of the target rather than sampling across
 # it. Featurising is around 33 seconds of fixed cost plus 0.04 seconds a candidate, so the marginal
@@ -79,6 +152,16 @@ CHEMISTRIES = {
 }
 for _spec in CHEMISTRIES.values():
     _spec["ps_pattern"] = "*" * (len(_spec["pattern"]) - 1)
+
+# Backbones offered as one-click presets for the 20-mer MOE gapmer, which is what most of the
+# training data is. A 20-mer has 19 linkages, and the alphabet is LINKAGE_CODES -- '*' for
+# phosphorothioate, 'o' for phosphodiester -- so the PO substitutions in the wings are written 'o'.
+# The names are positional because these patterns have no accepted names.
+BACKBONE_PRESETS = {
+    "Full PS": "*" * 19,
+    "Var 1": "*ooo***********oo**",
+    "Var 2": "*oooo**********oo**",
+}
 
 DEFAULT_CHEMISTRY = "2'-MOE"
 
@@ -146,6 +229,9 @@ def exon_layout(locus) -> dict:
     # the chart draws them over the exons to show which part of an exon is untranslated.
     return {
         "length": length,
+        # Carried so the results page can sanity-check the target against the cell line without
+        # reopening a 1.4 GB GTF: a chrY gene in a female-derived line cannot be expressed.
+        "chrom": getattr(locus, "chrom", None),
         "exons": offsets(getattr(locus, "_exon_indices", [])),
         "utr5": offsets(getattr(locus, "_5utr_indices", [])),
         "utr3": offsets(getattr(locus, "_3utr_indices", [])),
@@ -358,6 +444,7 @@ def _offtarget_table(ranked, *, genome, max_distance, exclude_genes=None):
         fasta.write_text("".join(f">{seq}\n{seq}\n" for seq in unique_seqs))
         alignment = subprocess.run(
             ["bowtie", "-v", str(max_distance), "-a", "-S", "--sam-nohead",
+             "-p", str(OFFTARGET_WORKERS),
              "-f", "-x", get_bowtie_index_base(genome=genome), str(fasta)],
             capture_output=True, text=True, check=True,
         )

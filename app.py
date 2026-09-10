@@ -13,7 +13,10 @@ import streamlit.components.v1 as components
 from Bio import SeqIO
 
 import jobs
+from email_service import send_contact_message
 from pipeline_runner import (
+    BACKBONE_PRESETS,
+    TOP_N,
     ACCESSIBILITY_FEATURE,
     GC_FEATURE,
     HYBRIDIZATION_FEATURE,
@@ -40,6 +43,9 @@ st.set_page_config(
     layout="wide" if st.query_params.get("job") else "centered",
 )
 
+_gene_select = components.declare_component(
+    "gene_select", path=str(Path(__file__).parent / "components" / "gene_select")
+)
 _pattern_editor = components.declare_component(
     "pattern_editor", path=str(Path(__file__).parent / "components" / "pattern_editor")
 )
@@ -48,6 +54,34 @@ _pattern_editor = components.declare_component(
 ORGANISM = "human"
 
 GENE_PLACEHOLDER = "Search a gene"
+
+# Parent-document markup so the note can overlap what follows it. Pure CSS hover: no script, which
+# Streamlit would strip anyway.
+GENE_HELP_HTML = """
+<div class="tauso-help">
+  <span class="tauso-help-mark">?</span>
+  <div class="tauso-help-box">
+    GENCODE v38 (Ensembl 104), GRCh38 primary assembly<br>
+    Targeting pre-mRNA transcripts, introns included<br>
+    Protein coding and lncRNA genes only
+  </div>
+</div>
+<style>
+/* Same height as the input beside it, so the marker centres against the box rather than
+   sitting near its top. */
+.tauso-help { position:relative; display:flex; align-items:center; height:36px; }
+.tauso-help-mark { display:inline-block; width:16px; height:16px; border-radius:50%;
+  border:1px solid #D7DDE5; color:#5A6473; background:#FBFCFD; font:10px/14px system-ui;
+  text-align:center; cursor:default; user-select:none; }
+.tauso-help:hover .tauso-help-mark { border-color:#2A78D6; color:#2A78D6; }
+.tauso-help-box { display:none; position:absolute; left:24px; top:50%;
+  transform:translateY(-50%); width:268px;
+  padding:7px 10px; border:1px solid #D7DDE5; border-radius:8px; background:#fff; color:#141A22;
+  font:11px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;
+  box-shadow:0 6px 18px rgba(20,26,34,.16); z-index:9999; }
+.tauso-help:hover .tauso-help-box { display:block; }
+</style>
+"""
 
 # One colour per modified sugar, matching the circles the editor draws.
 CHEMISTRY_COLOURS = {"2'-MOE": "#2A78D6", "cEt": "#EB6834"}
@@ -143,9 +177,25 @@ def target_section():
         if not genes:
             st.error("The gene database is not initialised yet.")
             return None, None, None
-        gene = st.selectbox(
-            "Gene", genes, index=None, placeholder=GENE_PLACEHOLDER, label_visibility="collapsed"
-        )
+        # st.selectbox builds a DOM node per option, so clearing a typed query re-rendered all
+        # ~59k of them and stalled for seconds. This component keeps the whole list -- every gene
+        # is scrollable and the count is shown -- but only the rows inside the viewport are ever
+        # in the DOM, so the cost no longer scales with the size of the genome.
+        # Drawn as raw HTML in the parent page, not inside the component and not as a native
+        # tooltip: an iframe cannot paint outside its own rectangle, and Streamlit's own tooltip
+        # picks its own side. Here the marker sits right of the box, the note opens to its right,
+        # and z-index puts it over the chemistry section rather than moving it.
+        picker_column, help_column = st.columns([4, 6])
+        with picker_column:
+            gene = _gene_select(
+                genes=genes,
+                placeholder=GENE_PLACEHOLDER,
+                value=st.session_state.get("gene_select"),
+                key="gene_select",
+                default=None,
+            )
+        with help_column:
+            st.markdown(GENE_HELP_HTML, unsafe_allow_html=True)
         if gene is None:
             return None, None, None
         return gene, "", f"Selected Gene: {gene}"
@@ -167,7 +217,7 @@ def target_section():
     return None, None, None
 
 
-def conditions_section():
+def conditions_section(target_name=None):
     """The oligo, then the assay. Every one of these is a model input, so the defaults are stated
     rather than hidden: the sugar/backbone pair defines the oligo, while transfection, dosage, cell
     density and cell line describe the experiment the prediction is conditioned on."""
@@ -178,7 +228,7 @@ def conditions_section():
         ) or DEFAULT_CHEMISTRY
     with edit_column:
         st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-        editing = st.toggle("Edit sugars and backbone")
+        editing = st.toggle("Edit sugars and linkages")
 
     preset = CHEMISTRIES[preset_name]
     sugar, backbone = preset["pattern"], preset["ps_pattern"]
@@ -187,6 +237,28 @@ def conditions_section():
     if editing:
         low, high = DESIGN_LENGTH_RANGE
         length = st.slider("Length (nt)", min_value=low, max_value=high, value=len(preset["pattern"]))
+        # One-click backbones, for the 20-mer MOE gapmer only: the patterns are 19 linkages long
+        # and mean nothing at another length or on another sugar.
+        if preset_name == DEFAULT_CHEMISTRY and length == len(preset["pattern"]):
+            button_columns = st.columns([1, 1, 1, 3])
+            for column, (name, pattern) in zip(button_columns, BACKBONE_PRESETS.items()):
+                with column:
+                    if st.button(name, key=f"backbone_{name}", width="stretch"):
+                        st.session_state["backbone_set"] = pattern
+                        st.session_state["backbone_nonce"] = (
+                            st.session_state.get("backbone_nonce", 0) + 1
+                        )
+            with button_columns[3]:
+                st.markdown(
+                    "",
+                    help=(
+                        "Backbones seen most often in the training data, so the model is best "
+                        "equipped to predict them. `*` is phosphorothioate, `o` is "
+                        "phosphodiester.  \n"
+                        + "  \n".join(f"**{n}** `{p}`" for n, p in BACKBONE_PRESETS.items())
+                    ),
+                )
+
         edited = _pattern_editor(
             length=length,
             code=_sugar_code(preset["pattern"]),
@@ -194,6 +266,8 @@ def conditions_section():
             label=preset_name,
             sugar=preset["pattern"] if length == len(preset["pattern"]) else None,
             backbone=preset["ps_pattern"] if length == len(preset["pattern"]) else None,
+            backbone_set=st.session_state.get("backbone_set"),
+            backbone_nonce=st.session_state.get("backbone_nonce", 0),
             key="pattern_editor",
             default={"sugar": preset["pattern"], "backbone": preset["ps_pattern"]},
         )
@@ -217,6 +291,7 @@ def conditions_section():
         cell_line = st.selectbox(
             "Cell line", fetch_cell_lines(ORGANISM), index=None, placeholder="Not specified"
         )
+        pairing_notice(target_name, cell_line)
 
     dosage_column, density_column = st.columns(2)
     with dosage_column:
@@ -249,6 +324,20 @@ WINDOW_NT = 2000
 CANDIDATES = "candidates"
 
 TRACK_SCALE = [(0.0, "#cf4c41"), (0.5, "#e9b23c"), (1.0, "#4aa058")]
+# Fixed cut points on the raw score, not percentiles of the run: a percentile always finds a
+# "top 1%" even on a gene with no good sites, while an empty top band says the true thing. The
+# ramp goes dark to pale so better reads as stronger without needing the legend.
+# label, lower bound, upper bound, colour, extra marker radius, opacity. The good bands are drawn
+# larger and at full strength and the poor ones recede: on a scan of tens of thousands, the few
+# marks worth looking at should not be the same size as the thousands that are not.
+SCORE_BANDS = [
+    ("Great", "above +20", 20.0, float("inf"), "#0B2E5C", 4.0, 1.00),
+    ("Good", "+10 to +20", 10.0, 20.0, "#1F6FD0", 3.0, 1.00),
+    ("Average", "0 to +10", 0.0, 10.0, "#7FB0E8", 0.5, 0.85),
+    ("Poor", "-15 to 0", -15.0, 0.0, "#B9C4D4", 0.0, 0.65),
+    ("No knockdown", "below -15", float("-inf"), -15.0, "#DCE2EA", 0.0, 0.50),
+]
+
 GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2", "utr5": "#2A78D6", "utr3": "#B4762E"}
 
 def _position_figure(designed, score_column, layout=None):
@@ -256,7 +345,9 @@ def _position_figure(designed, score_column, layout=None):
     own rows beneath, sharing the x axis so a column of marks is one candidate.
 
     The scores are a WebGL trace and each feature row is a single raster, so panning and zooming
-    move work the browser has already done rather than redrawing thousands of shapes."""
+    move work the browser has already done rather than redrawing thousands of shapes. A browser
+    without WebGL is handled in the page itself, which downgrades the traces to SVG rather than
+    letting Plotly fail with "WebGL is not supported by your browser"."""
     tracks = [
         (ACCESSIBILITY_FEATURE, "open site"),
         (MFE_FEATURE, "MFE"),
@@ -282,15 +373,6 @@ def _position_figure(designed, score_column, layout=None):
     # A full window is thousands of candidates over the panel's width, where solid marks read as a
     # block of colour; a short scan is a few dozen, where they read as scattered specks.
     crowding = min(1.0, float((x < x.min() + WINDOW_NT).sum()) / WINDOW_NT)
-    figure.add_trace(
-        go.Scattergl(
-            x=x, y=scores, mode="markers",
-            marker=dict(size=6 - 2 * crowding, color="#2A78D6", opacity=0.85 - 0.45 * crowding),
-            name="score", showlegend=False,
-            hovertemplate="%{x:,.0f} nt<br>score %{y:.2f}<extra></extra>",
-        ),
-        row=1, col=1,
-    )
 
     if layout:
         for begin, finish in layout.get("exons", []):
@@ -334,6 +416,7 @@ def _position_figure(designed, score_column, layout=None):
 
     # Colour limits come from the whole scan, so a shade means the same thing at any zoom, and
     # each row is one image however many candidates it covers.
+    track_values = []
     for i, (column, label) in enumerate(tracks, start=3):
         values = data[column].to_numpy(dtype=float)
         figure.add_trace(
@@ -351,26 +434,16 @@ def _position_figure(designed, score_column, layout=None):
             ),
             row=i, col=1,
         )
-        # An invisible point a candidate: the strip is a raster and has no value to hover, and
-        # this is what puts a number on this row at the position under the cursor.
-        figure.add_trace(
-            go.Scattergl(
-                x=x, y=np.zeros(len(values)), mode="markers",
-                marker=dict(size=1, color="rgba(0,0,0,0)"),
-                # A plain list, not the array: plotly serialises numpy as base64 typed data, which
-                # the crosshair below cannot index.
-                customdata=[None if v != v else float(v) for v in values],
-                name=label, showlegend=False,
-                hovertemplate="%{customdata:.4g}<extra>" + label + "</extra>",
-            ),
-            row=i, col=1,
-        )
+        # The row's values are carried by the score trace instead of an invisible marker trace of
+        # their own. Five such traces meant every candidate was uploaded and rendered six times
+        # over, for points nobody can see.
+        track_values.append(values)
         figure.update_yaxes(showticklabels=False, ticks="", showgrid=False, zeroline=False,
                             row=i, col=1)
         middle = sum(figure.layout[f"yaxis{i}"].domain) / 2
-        rows_at.append({"trace": len(figure.data) - 1, "y": middle, "label": label,
-                        "note": len(figure.layout.annotations)})
-        figure.data[-2].colorbar.y = middle - 0.012
+        rows_at.append({"column": len(track_values) - 1, "y": middle,
+                        "label": label, "note": len(figure.layout.annotations)})
+        figure.data[-1].colorbar.y = middle - 0.012
         figure.add_annotation(text=label, xref="paper", yref="paper", x=1.01, y=middle,
                               xanchor="left", yanchor="middle", showarrow=False,
                               font=dict(size=11, color="#3D4653"))
@@ -420,17 +493,73 @@ def _position_figure(designed, score_column, layout=None):
     bottom, top = figure.layout.yaxis.domain
     figure.layout.yaxis.domain = (bottom + 0.085, top)
     figure.update_layout(
-        width=1040, height=600, dragmode="pan", hovermode="x", plot_bgcolor="white",
-        paper_bgcolor="white", margin=dict(l=56, r=280, t=6, b=16),
-        showlegend=False, hoversubplots="axis", hoverdistance=-1, spikedistance=-1,
+        # "closest", not "x": with a trace a band and no distance limit, x mode reports the
+        # nearest point in every band at once, so one candidate under the cursor produced five
+        # scores in the tooltip. The crosshair writes the feature rows itself, so nothing is lost
+        # by asking plotly for the single point actually being pointed at.
+        width=1040, height=600, dragmode="pan", hovermode="closest", plot_bgcolor="white",
+        paper_bgcolor="white", margin=dict(l=56, r=280, t=46, b=16),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.004, xanchor="left", x=0,
+                    font=dict(size=10), itemsizing="constant", bgcolor="rgba(0,0,0,0)",
+                    itemwidth=30, tracegroupgap=0),
+        hoversubplots="axis", hoverdistance=-1, spikedistance=-1,
         hoverlabel=dict(bgcolor="white", bordercolor="#D7DBE0",
                         font=dict(size=11, color="#3D4653")),
         transition=dict(duration=0),
     )
+    # One row a candidate, one column a feature row, in the order rows_at records. A plain nested
+    # list, not an array: plotly serialises numpy as base64 typed data, which the crosshair cannot
+    # index. Every band carries the same columns, so the crosshair can read whichever band the
+    # cursor happens to be over.
+    carried = ([[None if v != v else float(v) for v in column] for column in zip(*track_values)]
+               if track_values else None)
+
+    # A trace a band rather than one for everything: plotly's legend then toggles a band on and
+    # off in the browser, with no round trip. Empty bands are added too -- "above +20: 0" is the
+    # useful answer for a gene with no standout sites, and a missing entry would not say it.
+    for adjective, span, lo, hi, colour, bonus, alpha in SCORE_BANDS:
+        inside = np.flatnonzero((scores > lo) & (scores <= hi))
+        # Where to go when this band is asked for, worked out here rather than in the browser:
+        # the position of its best candidate, and the width of the whole scan to size the window
+        # against. Reading it back out of the plotted arrays meant trusting how plotly stores
+        # them, which is what the previous attempt got wrong.
+        focus = float(x[inside][int(np.argmax(scores[inside]))]) if len(inside) else None
+        figure.add_trace(
+            go.Scattergl(
+                x=x[inside], y=scores[inside], mode="markers",
+                meta=dict(focus=focus, span=float(high - low)),
+                marker=dict(size=6 - 2 * crowding + bonus, color=colour,
+                            opacity=alpha - 0.15 * crowding),
+                customdata=[carried[i] for i in inside] if carried else None,
+                # The adjective sits on its own line above the range it stands for, so the legend
+                # reads as a judgement with its evidence under it rather than as a bare number.
+                name=f"<b>{adjective}</b><br>{span} ({len(inside):,})",
+                legendgroup=adjective, showlegend=True,
+                hovertemplate="%{x:,.0f} nt<br>score %{y:.2f}<extra></extra>",
+            ),
+            row=1, col=1,
+        )
+
+    # The cut points drawn where the eye can use them, faint enough not to compete with the marks.
+    for _adjective, _span, lo, _hi, colour, _bonus, _alpha in SCORE_BANDS:
+        if lo not in (float("-inf"), float("inf")) and low is not None:
+            figure.add_hline(y=lo, row=1, col=1, line=dict(color=colour, width=1, dash="dot"),
+                             opacity=0.55)
+
     return figure, rows_at
 
 
 CHART_HTML = """
+<style>
+  /* The y axes are fixed, so plotly puts an east-west resize cursor over the entire plot. It
+     reads as "drag to resize", which is not what dragging does here, so the ordinary pointer is
+     restored -- panning still works, it just stops advertising itself as a resize handle. */
+  .js-plotly-plot .nsewdrag,
+  .js-plotly-plot .ewdrag,
+  .js-plotly-plot .nsdrag,
+  .js-plotly-plot .drag { cursor: default !important; }
+</style>
 <div id="chart"></div>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>
@@ -441,11 +570,69 @@ CHART_HTML = """
   const notes = figure.layout.annotations || [];
 
   let showing = null;
+  // The crosshair repaints by relayouting the figure. A relayout that lands mid-drag interrupts
+  // plotly's pan, and the matched axes can come out of it at different ranges -- which shows up
+  // as one pane sliding on its own. Hovering is therefore ignored while a drag is in flight.
+  let dragging = false;
+
+  // Plotly's WebGL traces do not degrade: on a browser without WebGL they render nothing and
+  // print "WebGL is not supported by your browser". Downgrading them to SVG here keeps the chart
+  // working there while leaving every other browser on the fast path with all its points.
+  function hasWebGL() {
+    try {
+      const probe = document.createElement("canvas");
+      return !!(window.WebGLRenderingContext &&
+                (probe.getContext("webgl") || probe.getContext("experimental-webgl")));
+    } catch (e) {
+      return false;
+    }
+  }
+  if (!hasWebGL()) {
+    figure.data.forEach(function (trace) {
+      if (trace.type === "scattergl") { trace.type = "scatter"; }
+    });
+  }
 
   Plotly.newPlot(gd, figure.data, figure.layout, __CONFIG__).then(function () {
+    // Double-clicking a legend entry isolates that band, which plotly does on its own. It is
+    // only half the question though -- "which are the good ones" is usually followed by "where
+    // are they" -- so the view is moved to cover them as well. The x axes are matched to the
+    // rangeslider's axis, so the range has to be set on that one for the rest to follow.
+    const master = Object.keys(figure.layout).filter(function (k) {
+      return k.indexOf("xaxis") === 0 && figure.layout[k].rangeslider &&
+             figure.layout[k].rangeslider.visible;
+    })[0] || "xaxis";
+
+    gd.on("plotly_legenddoubleclick", function (event) {
+      const trace = gd.data[event.curveNumber];
+      // The band's best candidate and the width of the scan, both computed server-side and
+      // carried on the trace, so this does not depend on how plotly stores the plotted arrays.
+      const focus = trace && trace.meta ? trace.meta.focus : null;
+      if (focus === null || focus === undefined) { return true; }
+      const centre = focus;
+      const full = (trace.meta.span || 0);
+      const half = Math.max(600, full * 0.05) / 2;
+      // Every x axis, not only the master: matched axes should follow, and setting them all
+      // removes any doubt about which one the group is actually driven by.
+      const change = {};
+      Object.keys(gd.layout).forEach(function (k) {
+        if (k.indexOf("xaxis") === 0) { change[k + ".range"] = [centre - half, centre + half]; }
+      });
+      // After plotly's own isolate, so the two do not fight over the same relayout.
+      setTimeout(function () { Plotly.relayout(gd, change); }, 120);
+      return true;
+    });
+
+    gd.on("plotly_relayouting", function () { dragging = true; });
+    gd.on("plotly_relayout", function () { dragging = false; });
+    gd.addEventListener("mousedown", function () { dragging = true; });
+    window.addEventListener("mouseup", function () { dragging = false; });
+
     gd.on("plotly_hover", function (event) {
+      if (dragging) { return; }
       const point = event.points[0];
       const at = point.pointIndex;
+      const curve = point.curveNumber;
       if (at === undefined || at === showing) { return; }
       showing = at;
       const line = {
@@ -454,7 +641,11 @@ CHART_HTML = """
       };
       const labelled = notes.map(function (note) { return Object.assign({}, note); });
       rows.forEach(function (row) {
-        const value = gd.data[row.trace].customdata[at];
+        // Whichever band trace the cursor is over: every band carries the same columns, so the
+        // hovered curve is always a valid place to read the feature values from.
+        const cd = gd.data[curve] && gd.data[curve].customdata;
+        const carried = cd ? cd[at] : null;
+        const value = carried ? carried[row.column] : undefined;
         const shown = (value === null || value === undefined)
           ? "\u2014" : Number(value).toPrecision(3);
         labelled[row.note].text = row.label + "   <b>" + shown + "</b>";
@@ -486,6 +677,41 @@ def _chart_html(figure, rows_at) -> str:
     )
 
 
+# Superscript digits, so a gene carries its mismatch count without a column of its own:
+# HBD\u2070 is a perfect match, BBS9\u00b2 is two mismatches away.
+SUPERSCRIPT = {0: "\u2070", 1: "\u00b9", 2: "\u00b2", 3: "\u00b3", 4: "\u2074"}
+
+
+def _mark(gene, distance):
+    return f"{gene}{SUPERSCRIPT.get(int(distance), '')}"
+
+
+def _offtarget_labels(off_targets):
+    """Per candidate, the genes it hits: the two worst named with their mismatch count, rest counted.
+
+    Ordered by severity rather than alphabetically -- fewest mismatches first, then most hits --
+    so the name that shows is the one worth reacting to. A perfect match to a paralog is the point
+    of this column; "3" never said that.
+    """
+    labels = {}
+    if off_targets.empty:
+        return labels
+    for sequence, group in off_targets.groupby("aso_sequence"):
+        order = (
+            group.groupby("off_target_gene")
+            .agg(best=("distance", "min"), hits=("distance", "size"))
+            .sort_values(["best", "hits"], ascending=[True, False])
+        )
+        if order.empty:
+            continue
+        shown = [_mark(gene, row.best) for gene, row in order.head(2).iterrows()]
+        rest = len(order) - len(shown)
+        labels[sequence] = ", ".join(shown) + (
+            f", and {rest} other{'s' if rest != 1 else ''}" if rest > 0 else ""
+        )
+    return labels
+
+
 def _liability_chips(row):
     """The flags worth scrutinising on one candidate, as short labels."""
     chips = []
@@ -508,12 +734,209 @@ def _result_tables(job_id: str):
     )
 
 
+@st.cache_data(ttl=3600)
+def gene_index():
+    """gene_name -> [chromosome, gene span in nt].
+
+    Derived from the GTF once and then kept as a small JSON beside it. Scanning 1.4 GB takes a
+    couple of seconds, which is fine as a one-off and far too slow to sit between choosing a gene
+    and seeing what it implies. The span is what sets the candidate count: tiling runs across the
+    whole pre-mRNA, so a 20-mer yields exactly span - 19 candidates.
+    """
+    import re
+
+    data_dir = os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data")
+    cached = os.path.join(data_dir, "gene_index.json")
+    if os.path.exists(cached):
+        try:
+            with open(cached) as handle:
+                return json.load(handle)
+        except Exception:
+            pass
+
+    gtf = os.path.join(data_dir, "GRCh38.gtf")
+    table = {}
+    if not os.path.exists(gtf):
+        return table
+    with open(gtf) as handle:
+        for line in handle:
+            if line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) < 9 or fields[2] != "gene":
+                continue
+            name = re.search(r'gene_name "([^"]+)"', fields[8])
+            if name:
+                table[name.group(1)] = [fields[0], int(fields[4]) - int(fields[3]) + 1]
+    try:
+        with open(cached, "w") as handle:
+            json.dump(table, handle)
+    except OSError:
+        # A read-only data directory just means paying the scan once per process.
+        pass
+    return table
+
+
+def gene_chromosomes():
+    """gene_name -> chromosome."""
+    return {gene: entry[0] for gene, entry in gene_index().items()}
+
+
+# Runtime is close to linear in the length of the target, and the rate is a property of the
+# machine this happens to run on -- cores, memory, disk. It is therefore read from the data
+# directory rather than committed: another host will have another number, and nobody should have
+# to edit the source to correct it. See RUNTIME_CALIBRATION_FILE for how it was measured.
+RUNTIME_CALIBRATION_FILE = "runtime_calibration.json"
+RUNTIME_DEFAULTS = {"seconds_per_nt": 0.023, "fixed_seconds": 47.0}
+
+
+@st.cache_data(ttl=300)
+def runtime_calibration():
+    """Seconds per nucleotide and fixed overhead for this deployment."""
+    path = os.path.join(
+        os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"),
+        RUNTIME_CALIBRATION_FILE,
+    )
+    values = dict(RUNTIME_DEFAULTS)
+    try:
+        with open(path) as handle:
+            stored = json.load(handle)
+        for key in RUNTIME_DEFAULTS:
+            if isinstance(stored.get(key), (int, float)):
+                values[key] = float(stored[key])
+    except Exception:
+        pass
+    return values
+
+
+# A ceiling on what one submission may cost. Jobs run one at a time, so a very long target does
+# not merely inconvenience whoever asked for it -- it blocks the queue for everyone else. Set
+# TAUSO_MAX_RUNTIME_MINUTES to 0 to lift the limit entirely.
+MAX_RUNTIME_MINUTES = int(os.environ.get("TAUSO_MAX_RUNTIME_MINUTES", "60"))
+
+
+def runtime_estimate(gene):
+    """(seconds, spoken duration) for designing against `gene`, or None if its span is unknown.
+
+    Driven by the target's length rather than an exact candidate count: the count depends on the
+    oligo length too, and quoting a precise figure would suggest a precision this does not have.
+    """
+    entry = gene_index().get(gene)
+    if not entry or len(entry) < 2:
+        return None
+    calibration = runtime_calibration()
+    seconds = calibration["fixed_seconds"] + calibration["seconds_per_nt"] * entry[1]
+    if seconds < 90:
+        spoken = f"about {round(seconds / 10) * 10:.0f} seconds"
+    elif seconds < 3600:
+        spoken = f"about {seconds / 60:.0f} minutes"
+    else:
+        spoken = f"about {seconds / 3600:.1f} hours"
+    return seconds, spoken
+
+
+@st.cache_data(ttl=3600)
+def cell_line_sex(name: str):
+    """Donor sex for a cell line, from DepMap's model table, or None if it cannot be resolved."""
+    if not name:
+        return None
+    try:
+        from tauso.data.consts import resolve_depmap_id
+
+        depmap_id = resolve_depmap_id(name)
+        if not depmap_id:
+            return None
+        path = os.path.join(
+            os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "Model.csv"
+        )
+        models = pd.read_csv(path, usecols=["ModelID", "Sex"])
+        row = models[models["ModelID"] == depmap_id]
+        return None if row.empty else str(row.iloc[0]["Sex"])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def target_expression(gene: str, cell_line: str):
+    """The target's TPM in that cell line, read from the cohort table, or None if unavailable.
+
+    Taken from processed_expression rather than a finished job's features, because this has to
+    answer while the job is still running -- which is the only time the answer is any use.
+    """
+    if not gene or not cell_line:
+        return None
+    try:
+        from tauso.data.consts import resolve_depmap_id
+
+        depmap_id = resolve_depmap_id(cell_line)
+        if not depmap_id:
+            return None
+        path = os.path.join(
+            os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"),
+            "processed_expression",
+            f"{depmap_id}_expression.csv",
+        )
+        if not os.path.exists(path):
+            return None
+        table = pd.read_csv(path, usecols=["Gene", "expression_TPM"])
+        row = table[table["Gene"] == gene]
+        return None if row.empty else float(row.iloc[0]["expression_TPM"])
+    except Exception:
+        return None
+
+
+# "Not detected" has to mean what it says. A cutoff at 1 TPM called 0.34 undetected and 0.058 as
+# well; both are low expression, not absence. At 1e-5 the notice fires only on a reading that is
+# zero, so the claim is exactly true. Anything above it is a judgement for whoever is designing.
+NOT_DETECTED_TPM = 1e-5
+# Named in the notice so the claim is attributable: both the expression and the donor sex come
+# from this release, and a reader who doubts either knows exactly what to go and check.
+EXPRESSION_SOURCE = "DepMap Public 25Q3"
+
+
+def pairing_notice(gene, cell_line):
+    """One line under the cell line, when the target cannot be present in the line chosen.
+
+    Two claims, weighted differently on purpose. Expression is a measurement and measurements can
+    be wrong for a given batch, so a zero is amber. A chrY gene in a female-derived line is not a
+    measurement -- the sequence is absent from the genome -- so that one is red.
+    """
+    if not gene or not cell_line:
+        return
+    chrom = gene_chromosomes().get(gene)
+    sex = cell_line_sex(cell_line)
+    if chrom in ("chrY", "Y") and sex and sex.lower().startswith("f"):
+        _notice(
+            "#B42318",
+            f"Warning: {gene} is on chromosome Y and {cell_line} is a female cell line "
+            f"({EXPRESSION_SOURCE}) \u2014 the target is not in these cells.",
+        )
+        return
+    tpm = target_expression(gene, cell_line)
+    if tpm is not None and tpm < NOT_DETECTED_TPM:
+        # Scientific notation below zero-proper: "0.000 TPM" would read as an absence that the
+        # number does not actually claim.
+        reading = "0 TPM" if tpm == 0 else f"{tpm:.1e} TPM"
+        _notice(
+            "#B54708",
+            f"Warning: {gene} is not detected in {cell_line} "
+            f"({reading}, {EXPRESSION_SOURCE}).",
+        )
+
+
+def _notice(colour, text):
+    st.markdown(
+        f"<div style='margin-top:-6px;font-size:12px;line-height:1.4;color:{colour}'>{text}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def results_page(job_id: str):
     """Everything one finished job produced, opened from its own address."""
     job = jobs.get(job_id)
     if job is None:
         st.error(f"No job called {job_id}.")
-        st.page_link("app.py", label="Design something new")
+        st.markdown("[Design something new](/)")
         return
 
     st.markdown(
@@ -584,7 +1007,28 @@ def results_page(job_id: str):
         f"The chart above carries all {len(designed):,} scored candidates; this is the shortlist, "
         "which is also what the off-target search covers."
     )
+    if not off_targets.empty:
+        per_gene = (
+            off_targets.groupby("off_target_gene")
+            .agg(best=("distance", "min"), hits=("distance", "size"))
+            .sort_values(["best", "hits"], ascending=[True, False])
+        )
+        named = ", ".join(
+            f"**{_mark(gene, row.best)}** ({int(row.hits)})"
+            for gene, row in per_gene.head(4).iterrows()
+        )
+        regions = off_targets["region"].value_counts()
+        coding = int(regions.get("CDS", 0))
+        exonic = int(regions.get("exon", 0))
+        st.caption(
+            f"Off-targets across the top {len(shortlist)}: {named}"
+            + (f", and {len(per_gene) - 4} more genes" if len(per_gene) > 4 else "")
+            + f". {coding} hit CDS, {exonic} hit exons, {len(off_targets) - coding - exonic} "
+            "fall in introns."
+        )
+
     merged = shortlist.merge(safety, on="aso_sequence", how="left")
+    offtarget_genes = merged["aso_sequence"].map(_offtarget_labels(off_targets)).fillna("")
     hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
     accessibility = merged.get(ACCESSIBILITY_FEATURE)
     binding = merged.get(HYBRIDIZATION_FEATURE)
@@ -593,6 +1037,7 @@ def results_page(job_id: str):
     repeat_note = merged["repeat_note"] if "repeat_note" in merged else None
     if repeat_note is not None and not (repeat_note.fillna("").astype(str).str.strip() != "").any():
         repeat_note = None
+    exact_match = merged["aso_sequence"].map(hits.get(0, {})).fillna(0).astype(int)
     one_mismatch = merged["aso_sequence"].map(hits.get(1, {})).fillna(0).astype(int)
     two_mismatch = merged["aso_sequence"].map(hits.get(2, {})).fillna(0).astype(int)
     table = pd.DataFrame(
@@ -603,26 +1048,39 @@ def results_page(job_id: str):
             "region": merged["site_region"] if "site_region" in merged else None,
             "repeat": repeat_note,
             "score": merged[score_column].round(2),
-            "open": accessibility.round(2) if accessibility is not None else None,
-            "binding": binding.round(1) if binding is not None else None,
-            "RNase H1": merged[RNASE_FEATURE].round(2) if RNASE_FEATURE in merged else None,
-            "MFE": merged[MFE_FEATURE].round(3) if MFE_FEATURE in merged else None,
             "liabilities": merged.apply(_liability_chips, axis=1),
+            # A perfect match to another gene is the off-target that matters most, and it was
+            # computed and written to the CSV without ever being shown.
+            "0mm": exact_match,
             "1mm": one_mismatch,
             "2mm": two_mismatch,
+            "off-target genes": offtarget_genes,
         }
     ).dropna(axis=1, how="all")
+    # A perfect match to another gene disqualifies a candidate, so the cell is filled rather than
+    # left as a number among numbers -- it should be findable while scrolling, not read.
+    shown = table
+    if "0mm" in table.columns:
+        shown = table.style.map(
+            lambda hits: "background-color:#F7D4D7; color:#7A1620; font-weight:600"
+            if hits
+            else "",
+            subset=["0mm"],
+        )
     st.dataframe(
-        table,
+        shown,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.caption(
-        "**open** is how unpaired the target site is over a 60-nt window; **binding** is the "
-        "DNA:RNA duplex free energy in kcal/mol, more negative being a tighter duplex; "
-        "**MFE** is the folding energy of the site itself, more negative being more structured; **RNase H1** is how well the local dinucleotide context suits the enzyme "
-        "that cuts. "
-        "**1mm** and **2mm** count genomic hits to a gene other than the target. "
+        "**0mm**, **1mm** and **2mm** count genomic hits to a gene other than the target, at that "
+        "many mismatches -- a 0mm hit is a perfect match elsewhere, and the one worth acting on. "
+        "**off-target genes** names the two worst of them, fewest mismatches first, with the "
+        "mismatch count as a superscript -- HBD\u2070 is a perfect match, BBS9\u00b2 is two away. "
+        "The full list, one row per hit with its locus and region, is in the downloaded "
+        "off_targets.csv. "
+        "The biophysical columns (accessibility, duplex energy, MFE, RNase H1) are in the "
+        "downloaded designed_asos.csv. "
         "**region** is where that site sits in the gene model. **repeat** appears when the same "
         "sequence occurs at more than one site in the target: each copy is drawn at its own "
         "position, but only the first was scored, and the others carry that score."
@@ -637,11 +1095,56 @@ def results_page(job_id: str):
         st.json({"job": job_id, "target": job["target"], **parameters})
 
 
+def contact_page():
+    """A way to ask for something the server currently refuses to do."""
+    st.markdown("<style>.block-container{max-width:760px;}</style>", unsafe_allow_html=True)
+    st.title("TAUSO")
+    st.subheader("Contact us")
+    st.write(
+        "If you have a business or academic request, wish to calculate ASOs for a long gene, or "
+        "any other matter, please fill out your details and your request below."
+    )
+
+    # Kept in session state so the confirmation survives the rerun the button causes, and the
+    # form is not left looking as though nothing happened.
+    if st.session_state.get("contact_sent"):
+        st.success("Thank you \u2014 your message has been sent. We will be in touch by email.")
+        st.markdown("[Back to designing](/)")
+        return
+
+    with st.container(border=True):
+        sender = st.text_input("Your email")
+        message = st.text_area(
+            "Your request", height=200, placeholder="Please describe your request here"
+        )
+        st.caption("We reply to the address above. Nothing else is collected.")
+        submitted = st.button("Send", type="primary", width="stretch")
+
+    if submitted:
+        if "@" not in (sender or ""):
+            st.error("Please leave an email address so we can reply.")
+        elif not message.strip():
+            st.error("Please describe your request before sending.")
+        elif send_contact_message(sender.strip(), message.strip()):
+            st.session_state["contact_sent"] = True
+            st.rerun()
+        else:
+            st.error(
+                "This deployment has no contact address configured, so the message was not sent. "
+                "Nothing was lost \u2014 please copy your text before leaving."
+            )
+
+    st.markdown("[Back to designing](/)")
+
+
 def main():
     _clear_interrupted_jobs()
     opened = st.query_params.get("job")
     if opened:
         results_page(opened)
+        return
+    if st.query_params.get("contact"):
+        contact_page()
         return
 
     st.title("TAUSO")
@@ -650,11 +1153,30 @@ def main():
     target_name, target_sequence, source_info = target_section()
 
     with st.container(border=True):
-        sugar, backbone, transfection, dosage, density, cell_line = conditions_section()
+        sugar, backbone, transfection, dosage, density, cell_line = conditions_section(target_name)
 
-    email = st.text_input("Email for results", placeholder="you@lab.org")
+    email = st.text_input("Email for results")
 
-    if not st.button("Design ASOs", type="primary", use_container_width=True):
+    # Said before the button rather than after: the run is emailed, so this is the last moment the
+    # number is any use in deciding whether to press it.
+    estimate = runtime_estimate(target_name) if target_name and not target_sequence else None
+    too_long = False
+    if estimate:
+        seconds, spoken = estimate
+        too_long = MAX_RUNTIME_MINUTES > 0 and seconds > MAX_RUNTIME_MINUTES * 60
+        if too_long:
+            st.error(
+                f"Scoring ASOs on the {target_name} pre-mRNA would take **{spoken}**, over the "
+                f"{MAX_RUNTIME_MINUTES}-minute limit. Please [contact us](?contact=1) or bear "
+                "with us until we speed up our process."
+            )
+        else:
+            st.caption(
+                f"Tiling the whole pre-mRNA of {target_name} takes **{spoken}**. "
+                "You will be emailed a link when it finishes."
+            )
+
+    if not st.button("Design ASOs", type="primary", width="stretch", disabled=too_long):
         return
 
     if target_name is None:
