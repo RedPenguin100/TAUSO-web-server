@@ -46,6 +46,10 @@ services:
       - ./.tauso_data:/home/mambauser/.tauso_data
 
     # 1. Load the external file
+    # Gives the process a terminal, which is what lets the log formatter and Streamlit's own
+    # output emit colour -- without it they detect a pipe and print plain text.
+    tty: true
+
     env_file:
       - .env.local
 
@@ -53,15 +57,22 @@ services:
     environment:
       - PORT=8501
       - TAUSO_DATA_DIR=/home/mambauser/.tauso_data
-      # Cores for feature computation within a single design job. Jobs still run one at a time;
-      # this parallelises the calculators (MFE, accessibility, CAI/ENC, RBP motifs) inside one.
-      # Held under the `cpus` ceiling above, and well under it, because each joblib/loky worker
-      # is a process with its own copy of the working set.
-      - TAUSO_DESIGN_JOBS=8
+      # The machine budget. Everything that spends cores reads these: featurisation and the bowtie
+      # off-target search both size themselves from here, and pipeline_runner lowers the core count
+      # on its own if the memory would not stretch to that many worker processes. Keep them in step
+      # with `cpus` and `mem_limit` above.
+      - TAUSO_CORES=12
+      - TAUSO_MEMORY_MB=7168
       # 0 tiles the whole transcript instead of stopping after the first N windows from the 5' end.
       # Cost is roughly 0.04 s a candidate in featurisation, so a 8.6 kb transcript like MYO6 adds
       # a few minutes over the old 500-window bound.
       - TAUSO_FIRST_N=0
+      # Refuse a submission whose estimated run time exceeds this. Jobs run one at a time, so a
+      # multi-hour target blocks the queue rather than only its own submitter. 0 lifts the limit.
+      - TAUSO_MAX_RUNTIME_MINUTES=60
+      # Cores for the off-target stage alone. Deliberately below TAUSO_CORES: it runs last, on top
+      # of everything featurisation still holds, and that peak is what has hit mem_limit.
+      - TAUSO_OFFTARGET_CORES=4
 
   # The public front door, started with `docker compose --profile public up -d`. It dials out
   # to Cloudflare and serves the app over that connection, so the host opens no port and never
