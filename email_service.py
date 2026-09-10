@@ -13,6 +13,9 @@ load_dotenv(".env.local")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 FROM_NAME = os.getenv("FROM_NAME")
+# Where "contact us" goes. Read from the environment so the address is not committed: .env.local
+# is gitignored, and whoever runs the server should not have to edit source to receive its mail.
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL")
 
 # Keep a runaway exception message from bloating the failure email.
 REASON_MAX_CHARS = 300
@@ -104,3 +107,15 @@ def send_processing_failed(to_email: str, source_info: str, reason: str):
     </div>
     """
     send_mail(to_email, "TAUSO Analysis Failed", html)
+
+def send_contact_message(from_address: str, message: str) -> bool:
+    """Pass a visitor's message to whoever runs this deployment. False if nowhere to send it."""
+    if not CONTACT_EMAIL:
+        logger.error("CONTACT_EMAIL is not set; the contact form has nowhere to send.")
+        return False
+    body = (
+        f"<p><b>From:</b> {escape(from_address or 'not given')}</p>"
+        f"<p style='white-space:pre-wrap'>{escape(message)}</p>"
+    )
+    send_mail(CONTACT_EMAIL, "TAUSO: a message from the web server", body)
+    return True
