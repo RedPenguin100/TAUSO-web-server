@@ -39,7 +39,7 @@ RUN micromamba run -n base uv pip install --system -r requirements.txt
 WORKDIR $TAUSO_WORKSPACE/code
 
 # Pin the TAUSO source to a specific main commit for reproducible builds.
-ARG TAUSO_COMMIT=72c7eaca9eb3105c3fc074044be3304dbe9e725d
+ARG TAUSO_COMMIT=1a09dfc897516e3f7ab80cef0473b04c29af1ad4
 RUN git init -q . && \
     git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
     git config core.sparseCheckout true && \

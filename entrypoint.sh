@@ -19,9 +19,11 @@ if [ ! -f "$TAUSO_DATA_DIR/.tauso_initialized_v2" ]; then
     tauso setup-bowtie   # Very slow, can take 1~2 hours on slow single-threaded CPUs
     tauso setup-mrna-halflife
     tauso setup-attract
-    tauso setup-riboseq
     tauso setup-depmap
     tauso build-cell-context   # cohort expression + CAI weights + tGCN (default cohort)
+    # Transcript-level expression is a hard requirement now, not a warning: without it the
+    # first design fails outright. It pulls a ~3 GB DepMap table the first time.
+    tauso build-cohort-transcript-expression
     tauso setup-rrna
 
     # Create the sentinel file so this block is skipped on future reboots
