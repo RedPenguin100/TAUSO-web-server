@@ -1,7 +1,9 @@
 import hashlib
 import io
+import logging
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,8 @@ from Bio import SeqIO
 
 import jobs
 from email_service import send_contact_message
+
+logger = logging.getLogger(__name__)
 from pipeline_runner import (
     BACKBONE_PRESETS,
     TOP_N,
@@ -108,39 +112,68 @@ def fetch_genes():
         return json.load(f)
 
 
+def _squash(name: str) -> str:
+    """A cell line name with punctuation and case dropped, so "SK-N-AS" and "SKNAS" compare equal."""
+    return re.sub(r"[^A-Za-z0-9]", "", str(name)).upper()
+
+
 @st.cache_data(ttl=3600)
 def fetch_cell_lines(organism: str):
-    """Cell lines of `organism` this deployment can actually condition on: the expression files
-    present in the data directory, named so that design_asos resolves them. A DepMap id whose
-    expression was never downloaded, or whose name TAUSO cannot resolve, is left out rather than
-    offered and ignored."""
-    from tauso.data.consts import CELL_LINE_TO_DEPMAP, CELL_LINE_TO_DEPMAP_PROXY_DICT, resolve_depmap_id
+    """Every cell line this deployment can actually condition on.
 
+    The names come from the DepMap model table tauso ships -- all 2,132 of them -- rather than the
+    55-name proxy dict that used to be the only source: that dict was a curated subset, and a line
+    outside it could not be offered even with its expression on disk. What is still required is the
+    expression itself, so the list is whatever DepMap publishes intersected with what has been
+    built here. A line with no expression is left out rather than offered and then failing.
+    """
     if organism != "human":
         return []
 
-    expression_dir = os.path.join(
-        os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "processed_expression"
-    )
+    data_dir = os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data")
+    expression_dir = os.path.join(data_dir, "processed_expression")
     if not os.path.isdir(expression_dir):
         return []
     available = {f.replace("_expression.csv", "") for f in os.listdir(expression_dir)}
 
-    # Several dataset spellings map to one DepMap id; collect them so each line is offered once.
     names_by_id = {}
-    for name in CELL_LINE_TO_DEPMAP_PROXY_DICT:
-        depmap_id = resolve_depmap_id(name)
-        if depmap_id in available:
-            names_by_id.setdefault(depmap_id, []).append(name)
+    try:
+        import tauso
+        from tauso.data.consts import CELL_LINE_TO_DEPMAP_PROXY_DICT, resolve_depmap_id
 
-    canonical = {v: k for k, v in CELL_LINE_TO_DEPMAP.items()}
-    chosen = []
-    for depmap_id, names in names_by_id.items():
-        preferred = canonical.get(depmap_id)
-        # The canonical spelling is the one to show when it resolves; punctuation differences do
-        # not matter to the lookup, but some canonical names have no entry of their own.
-        chosen.append(preferred if preferred and resolve_depmap_id(preferred) == depmap_id else min(names, key=len))
-    return sorted(chosen)
+        models = pd.read_csv(
+            os.path.join(os.path.dirname(tauso.__file__), "data", "cell_lines", "depmap_models.csv")
+        )
+        table_name = {}
+        for name, depmap_id in zip(models["cell_line"], models["depmap_id"]):
+            if depmap_id in available:
+                table_name[depmap_id] = str(name)
+                names_by_id.setdefault(depmap_id, []).append(str(name))
+        # The curated spellings are nicer to read ("HEK-293" over "HEK293"), so they win where a
+        # line has one. Several curated names can point at one id, though, and some of those are
+        # typos ("A459" for A549), aliases ("Ts-24" for T24) or experiment labels
+        # ("Angptl2/Actin"); taking whichever came last would put those on the menu. The one that
+        # matches the table's own name once punctuation and case are dropped is the real spelling,
+        # and where none does the shortest wins, which prefers "Hep3B" over "HepG2/Hep3B".
+        curated_by_id = {}
+        for name in CELL_LINE_TO_DEPMAP_PROXY_DICT:
+            depmap_id = resolve_depmap_id(name)
+            if depmap_id in available:
+                curated_by_id.setdefault(depmap_id, []).append(name)
+        for depmap_id, names in curated_by_id.items():
+            canonical = _squash(table_name.get(depmap_id, ""))
+            best = sorted(names, key=lambda n: (_squash(n) != canonical, len(n), n))[0]
+            names_by_id.setdefault(depmap_id, []).insert(0, best)
+    except Exception:
+        logger.exception("Could not read the DepMap model table; falling back to the proxy dict.")
+        from tauso.data.consts import CELL_LINE_TO_DEPMAP_PROXY_DICT, resolve_depmap_id
+
+        for name in CELL_LINE_TO_DEPMAP_PROXY_DICT:
+            depmap_id = resolve_depmap_id(name)
+            if depmap_id in available:
+                names_by_id.setdefault(depmap_id, []).append(name)
+
+    return sorted(names[0] for names in names_by_id.values() if names)
 
 
 def parse_fasta_input(raw_text: str):
@@ -338,7 +371,10 @@ SCORE_BANDS = [
     ("No knockdown", "below -15", float("-inf"), -15.0, "#DCE2EA", 0.0, 0.50),
 ]
 
-GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2", "utr5": "#2A78D6", "utr3": "#B4762E"}
+GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2", "utr5": "#2A78D6", "utr3": "#B4762E",
+                # Sequence the canonical transcript does not cover: dashed and faded, so it
+                # reads as "not part of this transcript" rather than as intron.
+                "outside": "#C6CCD6"}
 
 def _position_figure(designed, score_column, layout=None):
     """Score against transcript position, with the structure and binding of each candidate on their
@@ -379,8 +415,22 @@ def _position_figure(designed, score_column, layout=None):
             if finish > low and begin < high:
                 figure.add_vrect(x0=max(begin, low), x1=min(finish, high), row=1, col=1,
                                  fillcolor="#5A6473", opacity=0.09, line_width=0, layer="below")
-        figure.add_shape(type="line", x0=low, x1=high, y0=0.5, y1=0.5, row=2, col=1,
+        # Solid only between the first and last exon, which is the canonical transcript. Outside
+        # that the axis is still gene -- the span belongs to some other isoform -- and drawing it
+        # in the intron colour said "intron" about sequence that is not in this transcript at all.
+        # HBB is the plain case: 59% of its axis sits upstream of the canonical transcript, and
+        # read as an intron before the 5'UTR.
+        exon_spans = layout.get("exons") or []
+        body_start = min((begin for begin, _ in exon_spans), default=low)
+        body_end = max((finish for _, finish in exon_spans), default=high)
+        figure.add_shape(type="line", x0=max(body_start, low), x1=min(body_end, high),
+                         y0=0.5, y1=0.5, row=2, col=1,
                          layer="below", line=dict(color=GENE_COLOURS["intron"], width=2))
+        for outside_start, outside_end in ((low, body_start), (body_end, high)):
+            if outside_end > outside_start:
+                figure.add_shape(type="line", x0=max(outside_start, low), x1=min(outside_end, high),
+                                 y0=0.5, y1=0.5, row=2, col=1, layer="below",
+                                 line=dict(color=GENE_COLOURS["outside"], width=1.5, dash="dash"))
         for begin, finish in layout.get("exons", []):
             if finish > low and begin < high:
                 figure.add_shape(type="rect", x0=max(begin, low), x1=min(finish, high),
@@ -406,7 +456,8 @@ def _position_figure(designed, score_column, layout=None):
               f"<span style='color:{GENE_COLOURS['exon']}'>\u2588</span> exon"
               f" &nbsp;<span style='color:{GENE_COLOURS['intron']}'><b>\u25ac</b></span> intron<br>"
               f"<span style='color:{GENE_COLOURS['utr5']}'>\u2588</span> 5'UTR"
-              f" &nbsp;<span style='color:{GENE_COLOURS['utr3']}'>\u2588</span> 3'UTR"),
+              f" &nbsp;<span style='color:{GENE_COLOURS['utr3']}'>\u2588</span> 3'UTR<br>"
+              f"<span style='color:{GENE_COLOURS['outside']}'>- -</span> other isoform(s)"),
         # Nudged up: the key grew to three lines, and centring it on the track leaves the last
         # line hanging below the gene bar. This sits the block level with the track it describes.
         xref="paper", yref="paper", x=1.01, y=sum(gene_domain) / 2 + 0.035,
@@ -477,6 +528,23 @@ def _position_figure(designed, score_column, layout=None):
     # Nothing zooms vertically: the score axis is pinned to the whole scan, and a drag that also
     # moved it would put the same score at a different height.
     figure.update_yaxes(fixedrange=True)
+    # Under the axis title, because "score" is the first thing anyone wants explained and the
+    # answer is not obvious. A plotly annotation rather than anything drawn in the page: it hovers
+    # inside the plot, where there is room, and moves with the axis it belongs to.
+    figure.add_annotation(
+        text="<b>?</b>", xref="paper", yref="paper", x=-0.055, y=0.905,
+        xanchor="center", yanchor="middle", showarrow=False,
+        font=dict(size=11, color="#8792A2"),
+        hovertext=(
+            "<b>Why a score, and not % inhibition?</b><br>"
+            "The model is fitted to knockdown de-meaned within each experiment rather than to the "
+            "absolute percentage.<br>Removing the offset between experiments lets it learn from all "
+            "of them at once,<br>so the ranking is sharper and the biology in the features is kept."
+        ),
+        hoverlabel=dict(bgcolor="white", bordercolor="#D7DBE0",
+                        font=dict(size=11, color="#3D4653")),
+        captureevents=True,
+    )
     figure.update_yaxes(title_text="score", gridcolor="#EEF0F3",
                         range=[float(np.nanmin(scores)) - margin, float(np.nanmax(scores)) + margin],
                         row=1, col=1)
@@ -684,6 +752,93 @@ SUPERSCRIPT = {0: "\u2070", 1: "\u00b9", 2: "\u00b2", 3: "\u00b3", 4: "\u2074"}
 
 def _mark(gene, distance):
     return f"{gene}{SUPERSCRIPT.get(int(distance), '')}"
+
+
+# The model has 552 features, most of them members of a family: 161 rbp_*, 80 ohe_*, 40 ribo_*.
+# TreeSHAP splits credit across correlated features, so no single one looks important even when
+# its family dominates -- the totals are what carry meaning, and what a reader can act on.
+def _diverging(value, limit):
+    """Blue for a contribution that lifted the score, red for one that pushed it down.
+
+    Computed here rather than through pandas' background_gradient, which needs matplotlib -- a
+    50 MB dependency to colour a table is a poor trade.
+    """
+    if value is None or value != value or not limit:
+        return ""
+    share = max(-1.0, min(1.0, float(value) / limit))
+    if share >= 0:
+        red, green, blue = 255 - int(95 * share), 255 - int(50 * share), 255
+    else:
+        red, green, blue = 255, 255 - int(75 * -share), 255 - int(80 * -share)
+    return f"background-color: rgb({red},{green},{blue})"
+
+
+SHAP_COLUMNS = 9
+
+SHAP_FAMILIES = {
+    "structure": "position", "ohe": "motif", "hybr": "duplex", "seq": "composition",
+    # fold_* is the folding energy of the site and access_* how unpaired it is: two measurements
+    # of the same thing, so they are one family rather than two that always move together.
+    "fold": "accessibility", "access": "accessibility", "off": "off-target",
+    "expr": "expression", "rbp": "RBP binding", "ribo": "ribosome", "selfaso": "self-structure",
+    "mod": "chemistry", "rnase": "RNase H1", "tox": "toxicity motifs", "flank": "flanks",
+    "cai": "codon usage", "enc": "codon usage", "tai": "codon usage", "on": "on-target sites",
+    "halflife": "half-life", "struct": "position", "sense": "accessibility",
+    "transfection": "assay", "volume": "assay", "density": "assay", "chem": "chemistry",
+    "interaction": "self-structure",
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def shap_by_family(job_id: str, sequences: tuple):
+    """Per candidate, what pushed its score up or down, totalled by feature family.
+
+    Exact TreeSHAP from the booster itself rather than the sampling approximation: xgboost can do
+    it natively, and 100 candidates cost about half a second. Read from the saved features, so
+    this costs the design run nothing and works on jobs that finished before it existed.
+    """
+    path = jobs.features_path(job_id)
+    # Asked of tauso rather than hardcoded: "v1" has pointed at two different files now, and a
+    # stale path here would explain a model the run never used.
+    try:
+        from tauso.inference.predict import DEFAULT_VERSION, MODEL_FILES
+
+        filename = MODEL_FILES[DEFAULT_VERSION]["filename"]
+    except Exception:
+        filename = "tauso_score_v1.json"
+    model = os.path.join(
+        os.environ.get("TAUSO_DATA_DIR", "/home/mambauser/.tauso_data"), "models", filename,
+    )
+    if not path.exists() or not os.path.exists(model):
+        return None
+    try:
+        import xgboost as xgb
+
+        booster = xgb.Booster()
+        booster.load_model(model)
+        names = booster.feature_names
+        frame = pd.read_parquet(path)
+        wanted = frame[frame["aso_sequence"].isin(sequences)]
+        if wanted.empty:
+            return None
+        # A job scored by an older feature set cannot be explained by this booster: reindex would
+        # quietly fill the missing columns with NaN and produce confident nonsense.
+        covered = sum(1 for n in names if n in wanted.columns)
+        if covered < 0.9 * len(names):
+            logger.info("SHAP skipped for %s: %d of %d features present", job_id, covered, len(names))
+            return None
+        matrix = wanted.reindex(columns=names)
+        contributions = booster.predict(
+            xgb.DMatrix(matrix, feature_names=names), pred_contribs=True
+        )[:, :-1]
+        families = [SHAP_FAMILIES.get(n.split("_")[0], n.split("_")[0]) for n in names]
+        totals = pd.DataFrame(contributions, columns=families).T.groupby(level=0).sum().T
+        totals.index = wanted["aso_sequence"].to_numpy()
+        return totals
+    except Exception:
+        # An explanation is a nicety; never let it take the results page down with it.
+        logger.exception("SHAP unavailable for %s", job_id)
+        return None
 
 
 def _offtarget_labels(off_targets):
@@ -1029,6 +1184,7 @@ def results_page(job_id: str):
 
     merged = shortlist.merge(safety, on="aso_sequence", how="left")
     offtarget_genes = merged["aso_sequence"].map(_offtarget_labels(off_targets)).fillna("")
+    families = shap_by_family(job_id, tuple(merged["aso_sequence"]))
     hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
     accessibility = merged.get(ACCESSIBILITY_FEATURE)
     binding = merged.get(HYBRIDIZATION_FEATURE)
@@ -1081,10 +1237,41 @@ def results_page(job_id: str):
         "off_targets.csv. "
         "The biophysical columns (accessibility, duplex energy, MFE, RNase H1) are in the "
         "downloaded designed_asos.csv. "
+        "The breakdown below says what moved each score. "
         "**region** is where that site sits in the gene model. **repeat** appears when the same "
         "sequence occurs at more than one site in the target: each copy is drawn at its own "
         "position, but only the first was scored, and the others carry that score."
     )
+
+    if families is not None and not families.empty:
+        st.subheader("SHAP breakdown")
+        st.caption(
+            "What moved each candidate's score, by feature family, straight from the model "
+            "(exact TreeSHAP). A row sums to the distance from the model's average, so the "
+            "columns explain the ranking this model produced -- not why an oligo works in a cell."
+        )
+        # The families are ranked by how much they actually move scores in this run, and the tail
+        # is summed into one column: nineteen columns is wider than the screen, and the last ten
+        # carry almost nothing.
+        weight = families.abs().mean().sort_values(ascending=False)
+        shown = list(weight.head(SHAP_COLUMNS).index)
+        rest = [c for c in families.columns if c not in shown]
+        breakdown = families[shown].round(2)
+        if rest:
+            breakdown["other"] = families[rest].sum(axis=1).round(2)
+        breakdown.insert(0, "sequence (5'->3')", breakdown.index)
+        breakdown.insert(0, "#", merged["rank"].to_numpy()[: len(breakdown)])
+        numeric = shown + (["other"] if rest else [])
+        limit = float(np.nanmax(np.abs(breakdown[numeric].to_numpy()))) or 1.0
+        st.dataframe(
+            breakdown.style
+            .map(lambda v: _diverging(v, limit), subset=numeric)
+            .format("{:+.2f}", subset=numeric),
+            hide_index=True,
+            width="stretch",
+        )
+        if rest:
+            st.caption("**other** sums " + ", ".join(sorted(rest)) + ".")
 
     st.subheader("Downloads")
     for name in jobs.RESULT_FILES:
