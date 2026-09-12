@@ -1,6 +1,8 @@
 import logging
 import os
 import subprocess
+import sys
+import threading
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -503,6 +505,7 @@ def execute_tauso_pipeline(config: JobConfig):
     jobs.mark(config.job_id, jobs.RUNNING)
     send_processing_started(config.user_email, config.source_info)
 
+    stop_watching = watch_memory()
     try:
         design_config = default_config()
         design_config.standard_chemical_pattern = config.chemical_pattern
@@ -534,6 +537,7 @@ def execute_tauso_pipeline(config: JobConfig):
             n_jobs=DESIGN_JOBS,
             off_targets=False,
         )
+        memory_note("featurisation and scoring")
         logger.info(f"Scored {len(ranked)} candidate ASOs; building result tables...")
 
         shortlist = ranked.head(TOP_N)
@@ -543,6 +547,7 @@ def execute_tauso_pipeline(config: JobConfig):
             max_distance=OFFTARGET_MAX_DISTANCE,
             exclude_genes=None,
         )
+        memory_note("the off-target table")
         logger.info(f"{len(off_targets)} off-target hits across the top {len(shortlist)}.")
 
         designed = summarize_design(ranked)
@@ -565,6 +570,7 @@ def execute_tauso_pipeline(config: JobConfig):
         jobs.mark(config.job_id, jobs.DONE)
 
         send_processing_completed(config.user_email, config.source_info, jobs.public_url(config.job_id))
+        memory_note("saving results")
         logger.info(f"Design job {config.job_id} complete for {config.user_email}.")
 
     except Exception as e:
@@ -574,6 +580,95 @@ def execute_tauso_pipeline(config: JobConfig):
         # The submitter has already had the "started" mail, so without this they would wait on a
         # result that is never coming.
         send_processing_failed(config.user_email, config.source_info, reason)
+    finally:
+        stop_watching()
+
+
+# Colour only when the logs go to a terminal, which `tty: true` in the compose file arranges.
+# Redirected to a file, the escape codes would be noise rather than emphasis.
+MEMORY_COLOUR = getattr(sys.stderr, "isatty", lambda: False)()
+
+
+def _cgroup_mb(name: str):
+    """One cgroup memory figure in MB, or None where the file is absent (cgroup v1, no container)."""
+    try:
+        with open(f"/sys/fs/cgroup/memory.{name}") as handle:
+            raw = handle.read().strip()
+        return None if raw == "max" else int(raw) / 2**20
+    except (OSError, ValueError):
+        return None
+
+
+def _tint(share):
+    """Bold green, amber or red by how close a reading came to the limit."""
+    if not MEMORY_COLOUR:
+        return "", ""
+    if share >= 0.85:
+        return "\033[1;31m", "\033[0m"
+    if share >= 0.6:
+        return "\033[1;33m", "\033[0m"
+    return "\033[1;32m", "\033[0m"
+
+
+def watch_memory(interval: float = 4.0, jump_mb: float = 150.0):
+    """Sample memory while the job runs, logging only when it moves.
+
+    tauso logs "Starting step: X" but no memory, and those steps are upstream. Sampling on a thread
+    and printing only material changes puts a reading between those lines, so growth can be pinned
+    to the step that caused it -- without a line every four seconds saying nothing happened.
+    """
+    stop = threading.Event()
+
+    def sample():
+        last = _cgroup_mb("current") or 0.0
+        limit = _cgroup_mb("max")
+        while not stop.wait(interval):
+            current = _cgroup_mb("current")
+            if current is None:
+                return
+            if abs(current - last) >= jump_mb:
+                arrow = "up" if current > last else "down"
+                share = current / limit if limit else 0.0
+                tint, reset = _tint(share)
+                logger.info(f"{tint}MEMORY {arrow} to {current:.0f} MB"
+                            + (f" ({share * 100:.0f}% of limit)" if limit else "") + reset)
+                last = current
+
+    threading.Thread(target=sample, daemon=True).start()
+    return stop.set
+
+
+def memory_note(stage: str) -> None:
+    """Log what the container is holding, at a point where it matters.
+
+    Read from the cgroup rather than the process: the peak is the sum across the parent, the pool
+    worker and every joblib child, which is what the limit is applied to and what the kernel kills
+    on. memory.peak is the high-water mark since the container started, so it survives the moment
+    that caused it.
+    """
+    try:
+        readings = {}
+        for name in ("current", "peak", "max"):
+            with open(f"/sys/fs/cgroup/memory.{name}") as handle:
+                readings[name] = handle.read().strip()
+        current = int(readings["current"]) / 2**20
+        peak = int(readings["peak"]) / 2**20
+        limit = readings["max"]
+        if limit == "max":
+            share, ceiling = 0.0, "no limit"
+        else:
+            ceiling_mb = int(limit) / 2**20
+            share = peak / ceiling_mb if ceiling_mb else 0.0
+            ceiling = f"{ceiling_mb:.0f} MB limit ({share * 100:.0f}% used at peak)"
+        # Coloured by how close the peak came to the limit, so the line that matters is the one
+        # that catches the eye: this is the number that decides whether a job survives.
+        tint, reset = _tint(share)
+        logger.info(
+            f"{tint}MEMORY after {stage}: {current:.0f} MB now, {peak:.0f} MB peak, {ceiling}{reset}"
+        )
+    except (OSError, ValueError):
+        # cgroup v1, or not in a container at all. Not worth a warning on every job.
+        pass
 
 
 def _report_lost_job(config: JobConfig, future):

@@ -72,7 +72,7 @@ services:
       - TAUSO_MAX_RUNTIME_MINUTES=60
       # Cores for the off-target stage alone. Deliberately below TAUSO_CORES: it runs last, on top
       # of everything featurisation still holds, and that peak is what has hit mem_limit.
-      - TAUSO_OFFTARGET_CORES=4
+      - TAUSO_OFFTARGET_CORES=1
 
   # The public front door, started with `docker compose --profile public up -d`. It dials out
   # to Cloudflare and serves the app over that connection, so the host opens no port and never
