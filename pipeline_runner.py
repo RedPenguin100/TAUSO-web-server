@@ -1,13 +1,10 @@
 import logging
 import os
-import subprocess
 import sys
 import threading
-import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -21,7 +18,7 @@ from tauso.aso_generation import (
     tox_details,
 )
 from tauso.data.consts import ASO_SEQUENCE, CANONICAL_GENE_NAME
-from tauso.off_target.search import annotate_hits, get_bowtie_index_base
+from tauso.off_target.search import annotate_hits, run_bowtie_search_many
 
 LOG_FORMAT = "%(asctime)s %(levelname)s: %(message)s"
 
@@ -421,9 +418,10 @@ def _offtarget_table(ranked, *, genome, max_distance, exclude_genes=None):
     """One row per hit the shortlist makes to a gene other than its target: the mismatch count,
     the region, and the locus.
 
-    tauso's `_sequence_offtarget_table` aligns one sequence per Bowtie process, and each process
-    reloads the genome index -- 0.6 s of index against 25 ms of alignment. Searching the shortlist
-    in a single run costs the index once.
+    The whole shortlist goes through one bowtie run, so the genome index is loaded once rather
+    than once per oligo -- 0.6 s of index against 25 ms of alignment. That batching used to live
+    here; tauso's `run_bowtie_search_many` now does it, and streams the alignments off the pipe
+    as columns besides, so this calls that instead of keeping a second copy of the parser.
     """
     from tauso.data.data import get_paths
 
@@ -440,37 +438,9 @@ def _offtarget_table(ranked, *, genome, max_distance, exclude_genes=None):
     if not unique_seqs:
         return pd.DataFrame(columns=OFFTARGET_COLS)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # The sequence is its own FASTA name, so the alignment carries it back without a lookup.
-        fasta = Path(tmp) / "shortlist.fasta"
-        fasta.write_text("".join(f">{seq}\n{seq}\n" for seq in unique_seqs))
-        alignment = subprocess.run(
-            ["bowtie", "-v", str(max_distance), "-a", "-S", "--sam-nohead",
-             "-p", str(OFFTARGET_WORKERS),
-             "-f", "-x", get_bowtie_index_base(genome=genome), str(fasta)],
-            capture_output=True, text=True, check=True,
-        )
-
-    hits = []
-    for line in alignment.stdout.splitlines():
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        flag = int(fields[1])
-        if flag & 4:
-            continue
-        sequence, chrom, start = fields[0], fields[2], int(fields[3]) - 1
-        mismatches = next((int(t.split(":")[2]) for t in fields[11:] if t.startswith("NM:i:")), 0)
-        hits.append(
-            {
-                "chrom": chrom,
-                "start": start,
-                "end": start + len(sequence),
-                "strand": "-" if flag & 16 else "+",
-                "mismatches": mismatches,
-                "sequence": sequence,
-            }
-        )
+    hits, _counts = run_bowtie_search_many(
+        unique_seqs, genome=genome, max_mismatches=max_distance, threads=OFFTARGET_WORKERS
+    )
 
     annotated = annotate_hits(hits, genome=genome)
     if annotated.empty:
