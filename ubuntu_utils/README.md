@@ -24,7 +24,6 @@ before the UI answers — see *How long* below.
 | Script | What it does | When |
 |---|---|---|
 | `01-install-docker.sh` | Docker Engine + Compose v2 from Docker's own apt repo, and adds you to the `docker` group | Once, on a new machine |
-| `02-install-claude.sh` | Claude Code, native installer | Optional — nothing here needs it |
 | `03-size-for-this-machine.sh` | Writes `docker-compose.override.yml` sized to this machine's cores and RAM | Once, and again if the hardware changes |
 | `04-start.sh` | Creates `.env.local` if missing, builds, starts | Every time you deploy |
 | `05-health-check.sh` | Read-only check of container, web, data, and the two files that fail late | Whenever something looks wrong |
