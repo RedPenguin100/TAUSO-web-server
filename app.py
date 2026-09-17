@@ -4,6 +4,7 @@ import logging
 import json
 import os
 import re
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -376,6 +377,17 @@ GENE_COLOURS = {"exon": "#3D4653", "intron": "#8792A2", "utr5": "#2A78D6", "utr3
                 # reads as "not part of this transcript" rather than as intron.
                 "outside": "#C6CCD6"}
 
+def _mfe_window(column: str) -> int:
+    """The window `column` averaged its energy over, from the name tauso gives it.
+
+    tauso stores the fold energy as kcal/mol divided by the window it was folded over, so a
+    25-nt window reads as -0.26 rather than -6.5. Read the window back off the name and the
+    track carries the energy a reader would recognise.
+    """
+    found = re.search(r"_win(\d+)", column)
+    return int(found.group(1)) if found else 1
+
+
 def _position_figure(designed, score_column, layout=None):
     """Score against transcript position, with the structure and binding of each candidate on their
     own rows beneath, sharing the x axis so a column of marks is one candidate.
@@ -385,9 +397,9 @@ def _position_figure(designed, score_column, layout=None):
     without WebGL is handled in the page itself, which downgrades the traces to SVG rather than
     letting Plotly fail with "WebGL is not supported by your browser"."""
     tracks = [
-        (ACCESSIBILITY_FEATURE, "open site"),
-        (MFE_FEATURE, "MFE"),
-        (HYBRIDIZATION_FEATURE, "binding dG"),
+        (ACCESSIBILITY_FEATURE, "accessible site"),
+        (MFE_FEATURE, "MFE (kcal/mol)"),
+        (HYBRIDIZATION_FEATURE, "binding dG (kcal/mol)"),
         (RNASE_FEATURE, "RNase H1"),
         (GC_FEATURE, "GC"),
     ]
@@ -470,6 +482,8 @@ def _position_figure(designed, score_column, layout=None):
     track_values = []
     for i, (column, label) in enumerate(tracks, start=3):
         values = data[column].to_numpy(dtype=float)
+        if column == MFE_FEATURE:
+            values = values * _mfe_window(column)
         figure.add_trace(
             go.Heatmap(
                 x=x, z=[values], colorscale=TRACK_SCALE,
@@ -477,7 +491,7 @@ def _position_figure(designed, score_column, layout=None):
                 hoverinfo="skip",
                 name=label, showlegend=False,
                 colorbar=dict(orientation="h", thickness=13, len=0.14,
-                              x=1.20, xanchor="left", yanchor="middle",
+                              x=1.01, xanchor="left", yanchor="middle",
                               tickfont=dict(size=8), tickangle=0, outlinewidth=0,
                               ticklabelposition="outside bottom", tickmode="array",
                               tickvals=[float(np.nanmin(values)), float(np.nanmax(values))],
@@ -495,7 +509,7 @@ def _position_figure(designed, score_column, layout=None):
         rows_at.append({"column": len(track_values) - 1, "y": middle,
                         "label": label, "note": len(figure.layout.annotations)})
         figure.data[-1].colorbar.y = middle - 0.012
-        figure.add_annotation(text=label, xref="paper", yref="paper", x=1.01, y=middle,
+        figure.add_annotation(text=label, xref="paper", yref="paper", x=1.17, y=middle,
                               xanchor="left", yanchor="middle", showarrow=False,
                               font=dict(size=11, color="#3D4653"))
 
@@ -1097,7 +1111,6 @@ def results_page(job_id: str):
     st.markdown(
         "<style>.block-container{max-width:1200px;}</style>", unsafe_allow_html=True
     )
-    st.title("TAUSO")
     parameters = job["parameters"]
 
     if job["status"] in (jobs.QUEUED, jobs.RUNNING):
@@ -1120,24 +1133,136 @@ def results_page(job_id: str):
     chemistry = describe_chemistry(
         parameters.get("chemical_pattern", ""), parameters.get("ps_pattern", "")
     )
-    st.caption(chemistry)
-
     shortlist = designed[designed["aso_sequence"].isin(safety["aso_sequence"])]
 
-    top = st.columns(4)
-    top[0].metric("Candidates", len(designed))
-    top[1].metric("Length", f"{len(parameters.get('chemical_pattern', ''))} nt")
-    top[2].metric("Cell line", parameters.get("cell_line") or "none")
-    top[3].metric("Off-target hits", len(off_targets))
+    # A banner rather than a heading: the name of the tool is not the subject of the page, and a
+    # title's worth of vertical space belongs to the candidates.
+    st.markdown(
+        "<div style='margin:-1.1rem 0 .9rem'><span style='font-size:2.6rem;font-weight:800;"
+        "letter-spacing:.16em;line-height:1.1;color:#1F3352'>TAUSO</span></div>",
+        unsafe_allow_html=True,
+    )
+    # The run's particulars sit in a small box beside the candidates rather than across the top:
+    # four metric cards took the first screen and pushed the table below the fold.
+    rail, main = st.columns([1, 3], gap="medium")
+    with rail:
+        facts = [
+            ("Target gene", str(job["target"])),
+            ("Candidates", f"{len(designed):,}"),
+            ("Length", f"{len(parameters.get('chemical_pattern', ''))} nt"),
+            ("Cell line", parameters.get("cell_line") or "none"),
+        ]
+        st.markdown(
+            "<div style='border:1px solid rgba(128,128,128,.25);border-radius:8px;"
+            "padding:.6rem .75rem;margin:.1rem 0 .5rem'>"
+            + "".join(
+                "<div style='display:flex;justify-content:space-between;gap:.6rem;"
+                "padding:.22rem 0" + ("" if i == len(facts) - 1 else
+                ";border-bottom:1px solid rgba(128,128,128,.15)") + "'>"
+                f"<span style='color:#6b7280;font-size:.8rem'>{escape(label)}</span>"
+                f"<span style='font-weight:650;font-size:.9rem'>{escape(str(value))}</span></div>"
+                for i, (label, value) in enumerate(facts)
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(chemistry)
+
+    with main:
+        st.subheader(f"Top {len(shortlist)} candidates")
+        merged = shortlist.merge(safety, on="aso_sequence", how="left")
+        offtarget_genes = merged["aso_sequence"].map(_offtarget_labels(off_targets)).fillna("")
+        families = shap_by_family(job_id, tuple(merged["aso_sequence"]))
+        hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
+        accessibility = merged.get(ACCESSIBILITY_FEATURE)
+        binding = merged.get(HYBRIDIZATION_FEATURE)
+        # Only worth a column when something in the shortlist actually repeats; a run with no repeated
+        # candidate leaves it None and dropna below takes the column out.
+        repeat_note = merged["repeat_note"] if "repeat_note" in merged else None
+        if repeat_note is not None and not (repeat_note.fillna("").astype(str).str.strip() != "").any():
+            repeat_note = None
+        exact_match = merged["aso_sequence"].map(hits.get(0, {})).fillna(0).astype(int)
+        one_mismatch = merged["aso_sequence"].map(hits.get(1, {})).fillna(0).astype(int)
+        two_mismatch = merged["aso_sequence"].map(hits.get(2, {})).fillna(0).astype(int)
+        table = pd.DataFrame(
+            {
+                "#": merged["rank"],
+                "sequence (5'->3')": merged["aso_sequence"],
+                "start": merged["target_start"],
+                "region": merged["site_region"] if "site_region" in merged else None,
+                "repeat": repeat_note,
+                "score": merged[score_column].round(2),
+                "liabilities": merged.apply(_liability_chips, axis=1),
+                # A perfect match to another gene is the off-target that matters most, and it was
+                # computed and written to the CSV without ever being shown.
+                "0mm": exact_match,
+                "1mm": one_mismatch,
+                "2mm": two_mismatch,
+                "off-target genes": offtarget_genes,
+            }
+        ).dropna(axis=1, how="all")
+        # The sequences are the answer, so the first screen is candidates rather than a preamble to
+        # them. Ten is what a reader compares without scrolling; the rest are one click away.
+        preview_rows = 10
+        view = table
+        if len(table) > preview_rows:
+            if not st.toggle(
+                f"Show all {len(table)} candidates", value=False, key="show_all_candidates"
+            ):
+                view = table.head(preview_rows)
+        # A perfect match to another gene disqualifies a candidate, so the cell is filled rather than
+        # left as a number among numbers -- it should be findable while scrolling, not read.
+        shown = view
+        if "0mm" in view.columns:
+            shown = view.style.map(
+                lambda hits: "background-color:#F7D4D7; color:#7A1620; font-weight:600"
+                if hits
+                else "",
+                subset=["0mm"],
+            )
+        st.dataframe(
+            shown,
+            hide_index=True,
+            width="stretch",
+        )
+        starts = shortlist.head(10)["target_start"].sort_values().tolist()
+        if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):
+            st.warning(
+                f"The top 10 all start between {starts[0]} and {starts[-1]}. Tiling moves one nucleotide "
+                "at a time, so these overlap heavily — they are one site rather than ten choices."
+            )
+
+        st.caption(
+            f"The best of {len(designed):,} scored candidates, and the ones the off-target search "
+            "covers. The chart below places all of them along the transcript."
+        )
+        st.caption(
+            "Superscripts give the distance between the ASO and the off-target: **0** a perfect "
+            "match, **1** one mismatched nucleotide, **2** two."
+        )
+        st.caption(
+            "**0mm**, **1mm** and **2mm** count genomic hits to a gene other than the target, at that "
+            "many mismatches -- a 0mm hit is a perfect match elsewhere, and the one worth acting on. "
+            "**off-target genes** names the two worst of them, fewest mismatches first, with the "
+            "mismatch count as a superscript -- HBD\u2070 is a perfect match, BBS9\u00b2 is two away. "
+            "The full list, one row per hit with its locus and region, is in the downloaded "
+            "off_targets.csv. "
+            "The biophysical columns (accessibility, duplex energy, MFE, RNase H1) are in the "
+            "downloaded designed_asos.csv. "
+            "The breakdown below says what moved each score. "
+            "**region** is where that site sits in the gene model. **repeat** appears when the same "
+            "sequence occurs at more than one site in the target: each copy is drawn at its own "
+            "position, but only the first was scored, and the others carry that score."
+        )
 
     st.subheader("Score along the transcript")
     st.caption(
-        "Each point is one candidate, placed where it binds. Higher is better predicted knockdown "
-        "relative to the others here — it ranks candidates, it is not a percent. The tracks beneath "
-        "carry the same candidates, each shaded red at the low end of its own range and green at "
-        "the high end — so a red **binding dG** mark is the most negative free energy, the "
-        "tightest duplex. The strip at the foot is the whole transcript: drag the shaded box on it "
-        "to move the view, or its edges to widen it."
+        "Each point is one ASO candidate, placed where it binds. Higher is better predicted "
+        "knockdown relative to the others here. The tracks beneath carry the same candidates, each "
+        "shaded red at the low end of its own range and green at the high end — so a red "
+        "**binding dG** mark is the most negative free energy, the tightest duplex. The strip at "
+        "the foot is the whole transcript: drag the shaded box on it to move the view, or its "
+        "edges to widen it."
     )
     layout = jobs.get_layout(job_id)
     figure, rows_at = _position_figure(designed, score_column, layout)
@@ -1150,98 +1275,6 @@ def results_page(job_id: str):
             f"exonic; the gene track at the foot shows the part of the transcript drawn here."
         )
 
-    starts = shortlist.head(10)["target_start"].sort_values().tolist()
-    if len(starts) > 1 and starts[-1] - starts[0] < 2 * len(parameters.get("chemical_pattern", "x" * 20)):
-        st.warning(
-            f"The top 10 all start between {starts[0]} and {starts[-1]}. Tiling moves one nucleotide "
-            "at a time, so these overlap heavily — they are one site rather than ten choices."
-        )
-
-    st.subheader(f"Top {len(shortlist)} candidates")
-    st.caption(
-        f"The chart above carries all {len(designed):,} scored candidates; this is the shortlist, "
-        "which is also what the off-target search covers."
-    )
-    if not off_targets.empty:
-        per_gene = (
-            off_targets.groupby("off_target_gene")
-            .agg(best=("distance", "min"), hits=("distance", "size"))
-            .sort_values(["best", "hits"], ascending=[True, False])
-        )
-        named = ", ".join(
-            f"**{_mark(gene, row.best)}** ({int(row.hits)})"
-            for gene, row in per_gene.head(4).iterrows()
-        )
-        regions = off_targets["region"].value_counts()
-        coding = int(regions.get("CDS", 0))
-        exonic = int(regions.get("exon", 0))
-        st.caption(
-            f"Off-targets across the top {len(shortlist)}: {named}"
-            + (f", and {len(per_gene) - 4} more genes" if len(per_gene) > 4 else "")
-            + f". {coding} hit CDS, {exonic} hit exons, {len(off_targets) - coding - exonic} "
-            "fall in introns."
-        )
-
-    merged = shortlist.merge(safety, on="aso_sequence", how="left")
-    offtarget_genes = merged["aso_sequence"].map(_offtarget_labels(off_targets)).fillna("")
-    families = shap_by_family(job_id, tuple(merged["aso_sequence"]))
-    hits = off_targets.groupby("aso_sequence")["distance"].value_counts().unstack(fill_value=0)
-    accessibility = merged.get(ACCESSIBILITY_FEATURE)
-    binding = merged.get(HYBRIDIZATION_FEATURE)
-    # Only worth a column when something in the shortlist actually repeats; a run with no repeated
-    # candidate leaves it None and dropna below takes the column out.
-    repeat_note = merged["repeat_note"] if "repeat_note" in merged else None
-    if repeat_note is not None and not (repeat_note.fillna("").astype(str).str.strip() != "").any():
-        repeat_note = None
-    exact_match = merged["aso_sequence"].map(hits.get(0, {})).fillna(0).astype(int)
-    one_mismatch = merged["aso_sequence"].map(hits.get(1, {})).fillna(0).astype(int)
-    two_mismatch = merged["aso_sequence"].map(hits.get(2, {})).fillna(0).astype(int)
-    table = pd.DataFrame(
-        {
-            "#": merged["rank"],
-            "sequence (5'->3')": merged["aso_sequence"],
-            "start": merged["target_start"],
-            "region": merged["site_region"] if "site_region" in merged else None,
-            "repeat": repeat_note,
-            "score": merged[score_column].round(2),
-            "liabilities": merged.apply(_liability_chips, axis=1),
-            # A perfect match to another gene is the off-target that matters most, and it was
-            # computed and written to the CSV without ever being shown.
-            "0mm": exact_match,
-            "1mm": one_mismatch,
-            "2mm": two_mismatch,
-            "off-target genes": offtarget_genes,
-        }
-    ).dropna(axis=1, how="all")
-    # A perfect match to another gene disqualifies a candidate, so the cell is filled rather than
-    # left as a number among numbers -- it should be findable while scrolling, not read.
-    shown = table
-    if "0mm" in table.columns:
-        shown = table.style.map(
-            lambda hits: "background-color:#F7D4D7; color:#7A1620; font-weight:600"
-            if hits
-            else "",
-            subset=["0mm"],
-        )
-    st.dataframe(
-        shown,
-        hide_index=True,
-        width="stretch",
-    )
-    st.caption(
-        "**0mm**, **1mm** and **2mm** count genomic hits to a gene other than the target, at that "
-        "many mismatches -- a 0mm hit is a perfect match elsewhere, and the one worth acting on. "
-        "**off-target genes** names the two worst of them, fewest mismatches first, with the "
-        "mismatch count as a superscript -- HBD\u2070 is a perfect match, BBS9\u00b2 is two away. "
-        "The full list, one row per hit with its locus and region, is in the downloaded "
-        "off_targets.csv. "
-        "The biophysical columns (accessibility, duplex energy, MFE, RNase H1) are in the "
-        "downloaded designed_asos.csv. "
-        "The breakdown below says what moved each score. "
-        "**region** is where that site sits in the gene model. **repeat** appears when the same "
-        "sequence occurs at more than one site in the target: each copy is drawn at its own "
-        "position, but only the first was scored, and the others carry that score."
-    )
 
     if families is not None and not families.empty:
         st.subheader("SHAP breakdown")
