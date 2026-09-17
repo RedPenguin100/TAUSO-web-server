@@ -39,7 +39,7 @@ RUN micromamba run -n base uv pip install --system -r requirements.txt
 WORKDIR $TAUSO_WORKSPACE/code
 
 # Pin the TAUSO source to a specific main commit for reproducible builds.
-ARG TAUSO_COMMIT=7e25ffa2be5c32f53d2cd5a706dc38c1720db48f
+ARG TAUSO_COMMIT=94523ab714ed73ed8d5f92bb360d9e5619538ef3
 RUN git init -q . && \
     git remote add origin https://github.com/RedPenguin100/TAUSO.git && \
     git config core.sparseCheckout true && \
@@ -76,6 +76,7 @@ WORKDIR /app
 
 # Copy your local UI scripts into the container
 COPY *.py entrypoint.sh ./
+COPY assets ./assets
 COPY .streamlit ./.streamlit
 COPY components ./components
 # The gene list is written here at boot, so the runtime user owns the directory.
