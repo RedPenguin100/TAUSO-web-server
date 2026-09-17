@@ -90,10 +90,14 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://tauso-web:8501
+    command: tunnel --no-autoupdate run
     profiles:
       - public
-    # No env_file: a Quick Tunnel takes no token, and a stray TUNNEL_TOKEN in the environment
-    # would send cloudflared looking for the named tunnel instead.
+    # The named tunnel on tauso.bio. Its hostname survives a restart, which a Quick Tunnel's does
+    # not: the address is registered against the tunnel, not minted per process. Where it routes
+    # is held by Cloudflare, not here -- the token identifies the tunnel and the dashboard says
+    # tauso.bio -> http://tauso-web:8501.
+    env_file:
+      - .env.local
     depends_on:
       - tauso-web

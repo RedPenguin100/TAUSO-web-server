@@ -569,6 +569,22 @@ def _cgroup_mb(name: str):
         return None
 
 
+def _cgroup_stat_mb(field: str):
+    """One field of memory.stat in MB, or None. `anon` is what the kernel kills on; `file` is
+    page cache, which it reclaims instead. Bowtie maps its index rather than reading it in, so
+    memory.current now counts a couple of gigabytes of index as cache: reporting that as though
+    it were the job's footprint says 94% of the limit when the job holds less than half of it."""
+    try:
+        with open("/sys/fs/cgroup/memory.stat") as handle:
+            for line in handle:
+                key, _, value = line.partition(" ")
+                if key == field:
+                    return int(value) / 2**20
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _tint(share):
     """Bold green, amber or red by how close a reading came to the limit."""
     if not MEMORY_COLOUR:
@@ -590,17 +606,23 @@ def watch_memory(interval: float = 4.0, jump_mb: float = 150.0):
     stop = threading.Event()
 
     def sample():
-        last = _cgroup_mb("current") or 0.0
+        # Anonymous memory, not memory.current: the mapped bowtie index is page cache, and
+        # following the total would report the job climbing when the kernel is only caching a
+        # file it can drop again.
+        def held():
+            return _cgroup_stat_mb("anon") or _cgroup_mb("current")
+
+        last = held() or 0.0
         limit = _cgroup_mb("max")
         while not stop.wait(interval):
-            current = _cgroup_mb("current")
+            current = held()
             if current is None:
                 return
             if abs(current - last) >= jump_mb:
                 arrow = "up" if current > last else "down"
                 share = current / limit if limit else 0.0
                 tint, reset = _tint(share)
-                logger.info(f"{tint}MEMORY {arrow} to {current:.0f} MB"
+                logger.info(f"{tint}MEMORY {arrow} to {current:.0f} MB held"
                             + (f" ({share * 100:.0f}% of limit)" if limit else "") + reset)
                 last = current
 
@@ -624,17 +646,23 @@ def memory_note(stage: str) -> None:
         current = int(readings["current"]) / 2**20
         peak = int(readings["peak"]) / 2**20
         limit = readings["max"]
+        # The kill decision is made on anonymous memory; page cache is reclaimed first. Both are
+        # in memory.current, so it is reported as its two parts rather than as one number that
+        # reads like the job is at the limit when half of it is a mapped index.
+        anon = _cgroup_stat_mb("anon")
+        cache = _cgroup_stat_mb("file")
         if limit == "max":
             share, ceiling = 0.0, "no limit"
         else:
             ceiling_mb = int(limit) / 2**20
-            share = peak / ceiling_mb if ceiling_mb else 0.0
-            ceiling = f"{ceiling_mb:.0f} MB limit ({share * 100:.0f}% used at peak)"
-        # Coloured by how close the peak came to the limit, so the line that matters is the one
-        # that catches the eye: this is the number that decides whether a job survives.
+            share = (anon if anon is not None else peak) / ceiling_mb if ceiling_mb else 0.0
+            ceiling = f"{ceiling_mb:.0f} MB limit ({share * 100:.0f}% of it held)"
+        # Coloured by how close the held memory came to the limit, so the line that matters is the
+        # one that catches the eye: this is the number that decides whether a job survives.
         tint, reset = _tint(share)
+        split = "" if anon is None else f" ({anon:.0f} MB held, {cache or 0:.0f} MB reclaimable)"
         logger.info(
-            f"{tint}MEMORY after {stage}: {current:.0f} MB now, {peak:.0f} MB peak, {ceiling}{reset}"
+            f"{tint}MEMORY after {stage}: {current:.0f} MB now{split}, {peak:.0f} MB peak, {ceiling}{reset}"
         )
     except (OSError, ValueError):
         # cgroup v1, or not in a container at all. Not worth a warning on every job.
