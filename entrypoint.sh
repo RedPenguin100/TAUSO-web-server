@@ -25,7 +25,16 @@ if [ ! -f "$TAUSO_DATA_DIR/.tauso_initialized_v2" ]; then
     echo "Initial data or weights not found. Running full TAUSO setup pipeline..."
 
     tauso setup-genome
-    tauso setup-bowtie   # Very slow, can take 1~2 hours on slow single-threaded CPUs
+    # bowtie-build defaults to one thread, which is an hour or two of one core doing what the
+    # whole machine could. It holds roughly --mem-per-thread per thread, so the product is kept
+    # inside the container's budget rather than left at the 800 MB default times however many
+    # cores this machine has.
+    BOWTIE_THREADS="${TAUSO_CORES:-1}"
+    BOWTIE_MEM_MB=$(( ${TAUSO_MEMORY_MB:-4096} * 60 / 100 / BOWTIE_THREADS ))
+    [ "$BOWTIE_MEM_MB" -gt 800 ] && BOWTIE_MEM_MB=800
+    [ "$BOWTIE_MEM_MB" -lt 200 ] && BOWTIE_MEM_MB=200
+    echo "Building the bowtie index on ${BOWTIE_THREADS} threads, ${BOWTIE_MEM_MB} MB each."
+    tauso setup-bowtie --threads "$BOWTIE_THREADS" --mem-per-thread "$BOWTIE_MEM_MB"
     tauso setup-mrna-halflife
     tauso setup-attract
     tauso setup-depmap
