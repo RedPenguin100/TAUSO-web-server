@@ -12,6 +12,7 @@ Everything here assumes you are in the repository root or running the scripts by
 git clone https://github.com/RedPenguin100/TAUSO-web-server.git
 cd TAUSO-web-server
 ./ubuntu_utils/01-install-docker.sh     # then log out and back in
+./ubuntu_utils/02-fix-permissions.sh
 ./ubuntu_utils/03-size-for-this-machine.sh
 ./ubuntu_utils/04-start.sh
 ```
@@ -24,9 +25,11 @@ before the UI answers — see *How long* below.
 | Script | What it does | When |
 |---|---|---|
 | `01-install-docker.sh` | Docker Engine + Compose v2 from Docker's own apt repo, and adds you to the `docker` group | Once, on a new machine |
+| `02-fix-permissions.sh` | Makes docker usable without `sudo` and the data directory writable by the container | Once, and after any `sudo docker` mistake |
 | `03-size-for-this-machine.sh` | Writes `docker-compose.override.yml` sized to this machine's cores and RAM | Once, and again if the hardware changes |
 | `04-start.sh` | Creates `.env.local` if missing, builds, starts | Every time you deploy |
 | `05-health-check.sh` | Read-only check of container, web, data, and the two files that fail late | Whenever something looks wrong |
+| `06-smoke-test.sh` | Runs the repository's own eight checks inside the container | After a deploy, or when a design fails for no clear reason |
 | `copy-data-from.sh` | rsync `.tauso_data` from a machine that has it, instead of rebuilding | Instead of the 4–8 hour build |
 | `mount-usb.sh` | Lists block devices and mounts one — Ubuntu Server auto-mounts nothing | If the data arrives on a drive |
 
@@ -98,6 +101,11 @@ recurs, check that file exists in `.tauso_data`.
 
 **A job dies with `BrokenProcessPool`.** The kernel OOM-killed a worker. Lower `TAUSO_CORES` in
 `docker-compose.override.yml` before touching anything else.
+
+**`Permission denied` on `/home/mambauser/.tauso_data`.** The image runs as uid 57439, not as you
+and not as root, so a directory only you can write is closed to it. Run `02-fix-permissions.sh`.
+Do not reach for `sudo docker`: it works by running the container as root, and then everything it
+writes is root-owned and your next command without `sudo` fails instead.
 
 **Edits to `app.py` do not show up.** The app is baked into the image, not mounted, so
 `docker compose restart` reuses the old one. Rebuild: `./ubuntu_utils/04-start.sh`.
