@@ -12,7 +12,13 @@ TOTAL_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
 # Leave the host a quarter of the machine, or 1 GB, whichever is larger: a cap above what the
 # machine has does not bound anything -- the kernel OOM killer fires first and takes whatever it
 # likes, including processes outside the container.
-RESERVE_MB=$(( TOTAL_MB / 4 ))
+# Under 4 GB the host needs a bigger share, not a smaller one: there is no swap to absorb a
+# spike, so the OOM killer is the only thing between a tight moment and a dead machine.
+if [ "$TOTAL_MB" -lt 4096 ]; then
+    RESERVE_MB=$(( TOTAL_MB * 2 / 5 ))
+else
+    RESERVE_MB=$(( TOTAL_MB / 4 ))
+fi
 [ "$RESERVE_MB" -lt 1024 ] && RESERVE_MB=1024
 LIMIT_MB=$(( TOTAL_MB - RESERVE_MB ))
 [ "$LIMIT_MB" -lt 1536 ] && LIMIT_MB=1536
