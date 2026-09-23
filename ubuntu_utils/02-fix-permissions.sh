@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Make docker usable without sudo, and make the data directory writable by the container.
+# Make docker usable without sudo, and make .tauso_data writable by the container (uid 57439).
 #
-# These are one problem wearing two hats. The image runs as mambauser, uid 57439 -- not root and
-# not you. A bind-mounted directory that only uid 1000 can write gives "Permission denied" on
-# /home/mambauser/.tauso_data the moment setup tries to create anything. Reaching for `sudo docker`
-# makes that go away by running the container as root, and then every file it writes is root-owned,
-# so the next command you run without sudo fails instead. The fix is to stop using sudo and open
-# the directory to the container's uid.
+# Never `sudo docker ...` for this stack -- user mode only. Sudo works, then leaves root-owned
+# files your user cannot touch, which fails much later in the setup chain.
+#
+# A shell's groups are fixed at login, so `usermod -aG docker` cannot affect the shell that ran
+# it. A console login on tty1 from before the script keeps saying "permission denied" while a
+# fresh ssh session on the same machine works fine. Log out and back in there -- re-running this
+# script will not help.
 set -euo pipefail
 
-# Resolved before the cd, because the re-exec below runs this path again from a different cwd.
-SELF=$(readlink -f "$0")
+SELF=$(readlink -f "$0")   # before the cd: the re-exec below starts from elsewhere
 cd "$(dirname "$SELF")/.."
 
 DATA=.tauso_data
@@ -26,10 +26,8 @@ else
         sudo usermod -aG docker "$USER"
         echo "    added $USER to the docker group"
     fi
-    # A shell's groups are fixed at login, so this one cannot reach the docker socket whatever we
-    # just did -- and the check at the bottom would then fail for a reason this script created,
-    # reporting it as a missing image. `sg` starts one shell that does have the group, so re-exec
-    # there and the checks mean something on the first run.
+    # `sg` gives one shell the new group, so the checks below test the socket rather than fail
+    # for a reason this script just created.
     if [ -z "${TAUSO_FIXPERMS_REEXEC:-}" ] && command -v sg >/dev/null 2>&1; then
         echo "    re-running under the new group"
         export TAUSO_FIXPERMS_REEXEC=1
@@ -41,14 +39,11 @@ fi
 echo "==> $DATA"
 mkdir -p "$DATA"
 
-# The container writes as 57439, you read and rsync as yourself, and neither of you should need
-# sudo for it. 777 on this one directory is what makes that true; its contents keep normal modes.
+# 777 here so both uid 57439 and you can write without sudo. Contents keep normal modes.
 chmod 777 "$DATA" 2>/dev/null || sudo chmod 777 "$DATA"
 echo "    $(stat -c '%A %U:%G' "$DATA")  <- container uid $CONTAINER_UID can write here"
 
-# Root-owned files are the residue of an earlier `sudo docker`. Only the ones neither you nor the
-# container can get at are a problem: a root-owned file left world-readable is read perfectly well
-# by both, and taking ownership of it would be noise.
+# Residue of an earlier `sudo docker`. Only files neither of you can read are a problem.
 stuck=$(find "$DATA" -user root ! -perm -o+r -print -quit 2>/dev/null || true)
 if [ -n "$stuck" ]; then
     echo "    root-owned and unreadable files found (left by sudo docker); taking ownership"
@@ -57,9 +52,7 @@ if [ -n "$stuck" ]; then
 fi
 
 echo "==> checking"
-# Reaching the daemon and writing to the volume are separate failures with separate fixes, so they
-# are reported separately. The old script rolled both into "the image may not be built yet", which
-# named the one cause that was usually not it.
+# Daemon reachability and volume writability fail for different reasons, so report them apart.
 if ! docker info >/dev/null 2>&1; then
     echo "    cannot talk to the docker daemon. In order of likelihood:"
     echo "      - this shell still has the old groups:  log out and back in, or run 'newgrp docker'"
@@ -89,5 +82,5 @@ if [ -n "${RELOGIN:-}" ]; then
 fi
 
 echo
-echo "Never run 'sudo docker compose ...' for this stack. It works, and it leaves behind files"
-echo "your own user cannot touch, which surfaces much later as a failure in the setup chain."
+echo "Never 'sudo docker compose ...' for this stack -- user mode only, or you get root-owned"
+echo "files your user cannot touch and a setup failure much later."

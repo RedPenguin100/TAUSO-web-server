@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# Write docker-compose.override.yml sized to this machine's CPU and RAM.
-#
-# An override rather than an edit to docker-compose.yml: the tracked file stays as the production
-# box has it, compose merges this on top automatically, and git never sees a machine-specific diff.
+# Write docker-compose.override.yml sized to this machine. An override, not an edit: compose
+# merges it automatically and git never sees a machine-specific diff.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CORES=$(nproc)
 TOTAL_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
 
-# Leave the host a quarter of the machine, or 1 GB, whichever is larger: a cap above what the
-# machine has does not bound anything -- the kernel OOM killer fires first and takes whatever it
-# likes, including processes outside the container.
-# Under 4 GB the host needs a bigger share, not a smaller one: there is no swap to absorb a
-# spike, so the OOM killer is the only thing between a tight moment and a dead machine.
+# Leave the host a quarter, or 1 GB, whichever is larger -- a cap above what the machine has
+# bounds nothing. Under 4 GB reserve more, not less: no swap to absorb a spike.
 if [ "$TOTAL_MB" -lt 4096 ]; then
     RESERVE_MB=$(( TOTAL_MB * 2 / 5 ))
 else
@@ -23,15 +18,14 @@ fi
 LIMIT_MB=$(( TOTAL_MB - RESERVE_MB ))
 [ "$LIMIT_MB" -lt 1536 ] && LIMIT_MB=1536
 
-# /dev/shm only carries pandarallel's pickled chunks, and it counts against the cap above, so it
-# is a slice of it rather than half: 64 MB is what fails, not 1.5 GB is what is needed.
+# /dev/shm carries pandarallel's pickled chunks and counts against the cap, so take a slice of
+# it: 64 MB is what fails, not 1.5 GB is what is needed.
 SHM_MB=$(( LIMIT_MB / 4 ))
 [ "$SHM_MB" -gt 1024 ] && SHM_MB=1024
 [ "$SHM_MB" -lt 256 ] && SHM_MB=256
 
-# Workers are process-parallel and each costs ~50 MB, on top of the ~1 GB a job holds anyway.
-# Past the knee they buy little -- the machine's clock throttling caps the speedup near 3x -- so
-# on a small machine the core count is bounded by memory rather than by cores.
+# Each worker costs ~50 MB on top of the ~1 GB a job holds, so on a small machine the worker
+# count is bounded by memory, not by cores.
 WORKERS=$CORES
 [ "$WORKERS" -gt 8 ] && WORKERS=8
 BY_MEMORY=$(( (LIMIT_MB - 1024) / 256 ))

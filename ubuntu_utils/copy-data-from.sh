@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Copy .tauso_data from a machine that already has it, instead of rebuilding it here.
-#
-# Building from scratch is 4-8 hours on a slow machine; copying is bounded by the link. The full
-# directory is ~43 GB, of which ~24 GB is per-cell-line expression -- one 1.8 MB gene table and one
-# 13 MB transcript table per line. --lean skips those, leaving ~19 GB, and the dropdown then offers
-# only the lines whose files are present.
+# Copy .tauso_data from a machine that has it, instead of the 4-8 hour rebuild. ~43 GB, of which
+# ~24 GB is per-cell-line expression; --lean skips those (~19 GB) and the dropdown then offers
+# only the lines present.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +27,7 @@ fi
 SRC=$1
 mkdir -p .tauso_data
 
-# --partial matters: a dropped link resumes rather than restarting 43 GB.
+# --partial: a dropped link resumes rather than restarting 43 GB.
 ARGS=(-avh --progress --partial)
 if [ "$LEAN" -eq 1 ]; then
     ARGS+=(--exclude 'processed_expression/*' --exclude 'processed_transcript_expression/*')

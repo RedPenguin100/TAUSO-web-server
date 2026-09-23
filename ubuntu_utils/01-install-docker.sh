@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Docker Engine from Docker's own apt repository.
-#
-# Not snap: the snap runs confined and bind mounts outside $HOME fail or mount the wrong thing,
-# and this stack bind-mounts .tauso_data. Not `apt install docker.io` either: it trails by a
-# release or two and does not reliably bring the Compose v2 plugin, which every command here uses.
+# Docker Engine from Docker's own apt repo. Not snap (confined; breaks the .tauso_data bind
+# mount) and not docker.io (trails, and no reliable Compose v2 plugin).
 set -euo pipefail
 
 echo "==> Removing any distro Docker packages"
@@ -24,7 +21,6 @@ sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 echo "==> Letting $USER run docker without sudo"
-# Without this the bind-mounted data directory ends up root-owned and the container cannot write.
 sudo usermod -aG docker "$USER"
 
 echo
