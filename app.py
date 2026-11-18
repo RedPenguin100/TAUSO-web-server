@@ -4,6 +4,7 @@ import logging
 import json
 import os
 import re
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -1102,6 +1103,79 @@ def _notice(colour, text):
 
 def results_page(job_id: str):
     """Everything one finished job produced, opened from its own address."""
+def _spoken_gap(seconds: float) -> str:
+    """A duration as a reader would say it. Under a minute stays in seconds: "about 0 minutes"
+    is worse than useless to somebody deciding whether to keep the tab open."""
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return f"{round(seconds / 10) * 10:.0f} seconds"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} minutes"
+    return f"{seconds / 3600:.1f} hours"
+
+
+def _render_waiting(job):
+    """The results page while the design is still running.
+
+    Streamlit reruns on interaction, not on a timer, so this page cannot update itself -- the old
+    copy said it would and then sat there looking hung. Instead it gives the reader the three
+    numbers they need to decide whether to wait: when the work was asked for, how long this
+    target usually takes on this machine, and what the clock says now.
+    """
+    submitted = datetime.fromisoformat(job["created_at"])
+    now = datetime.now(timezone.utc)
+    waited = (now - submitted).total_seconds()
+
+    # The estimate is length-driven and per-machine (see runtime_calibration). A pasted sequence
+    # is not in the gene index, so there is no estimate for it and the panel says so rather than
+    # inventing one.
+    estimate = runtime_estimate(job["target"]) if job.get("target") else None
+
+    if job["status"] == jobs.QUEUED:
+        st.info("This design is queued. Jobs run one at a time, so it starts when the one ahead finishes.")
+    else:
+        st.info("This design is running.")
+
+    rows = [
+        ("Submitted", f"{submitted:%H:%M:%S} UTC &nbsp;·&nbsp; {_spoken_gap(waited)} ago"),
+        ("Time now", f"{now:%H:%M:%S} UTC"),
+    ]
+    if estimate:
+        total, spoken = estimate
+        expected_at = submitted.timestamp() + total
+        remaining = expected_at - now.timestamp()
+        rows.insert(1, ("Usually takes", f"{spoken} for {escape(str(job['target']))} on this machine"))
+        # A long target can finish tomorrow, and a bare "03:56 UTC" then reads as already past,
+        # so the date comes along whenever the finish is not today.
+        finish = datetime.fromtimestamp(expected_at, timezone.utc)
+        stamp = f"{finish:%H:%M:%S} UTC" if finish.date() == now.date() else f"{finish:%d %b, %H:%M:%S} UTC"
+        rows.insert(2, ("Expected to finish", stamp))
+        rows.append(
+            ("Still to wait", f"about {_spoken_gap(remaining)}")
+            if remaining > 0
+            else ("Still to wait", "it is taking longer than the estimate -- it has not failed, only overrun")
+        )
+
+    st.markdown(
+        "<table style='border-collapse:collapse;margin:.4rem 0 1rem'>"
+        + "".join(
+            f"<tr><td style='padding:.18rem 1.1rem .18rem 0;color:#515C6B'>{label}</td>"
+            f"<td style='padding:.18rem 0;font-weight:600'>{value}</td></tr>"
+            for label, value in rows
+        )
+        + "</table>",
+        unsafe_allow_html=True,
+    )
+
+    if estimate:
+        # Capped below 1.0: a full bar on a job that has overrun reads as finished.
+        st.progress(min(waited / estimate[0], 0.99) if estimate[0] else 0.0)
+
+    st.caption("This page does not refresh by itself. Press the button to look again.")
+    if st.button("Check again"):
+        st.rerun()
+
+
     job = jobs.get(job_id)
     if job is None:
         st.error(f"No job called {job_id}.")
@@ -1114,9 +1188,7 @@ def results_page(job_id: str):
     parameters = job["parameters"]
 
     if job["status"] in (jobs.QUEUED, jobs.RUNNING):
-        st.info("This design is still running. The page will show the results when it finishes.")
-        if st.button("Check again"):
-            st.rerun()
+        _render_waiting(job)
         return
     if job["status"] == jobs.FAILED:
         st.error("This design did not finish.")
